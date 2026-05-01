@@ -10,22 +10,24 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
-from vosk import Model, KaldiRecognizer
 
-from config import BOT_TOKEN
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ================== НАСТРОЙКИ ==================
 
 ALLOWED_USER_ID = 137602775
 
-FFMPEG_PATH = r"C:\ffmpeg\bin\ffmpeg.exe"
-VOSK_MODEL_PATH = "models/vosk-model-small-ru-0.22"
+# Для Render путь должен быть просто "ffmpeg", а не путь Windows C:\...
+FFMPEG_PATH = "ffmpeg"
 
 DEFAULT_BANK_DEPOSIT = 88288796
 DEFAULT_BANK_ACCOUNT = 575556
 DEFAULT_BANK_PERCENT = 52005.73
 
 logging.basicConfig(level=logging.INFO)
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не найден. Проверь Environment Variables в Render.")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
@@ -89,10 +91,6 @@ bank_get("deposit", DEFAULT_BANK_DEPOSIT)
 bank_get("account", DEFAULT_BANK_ACCOUNT)
 bank_get("percent", DEFAULT_BANK_PERCENT)
 
-# ================== ГОЛОС ==================
-
-model = Model(VOSK_MODEL_PATH)
-
 # ================== КНОПКИ ==================
 
 kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -126,7 +124,7 @@ def extract_number(text):
         raw = digit_match.group(0).replace(" ", "").replace(",", ".")
         try:
             return float(raw)
-        except:
+        except Exception:
             pass
 
     words = {
@@ -331,7 +329,7 @@ async def bank_report(message):
         f"💳 На счёте: {fmt_sum(account)} сум\n"
         f"📈 Последний процент: {fmt_sum(percent)} сум\n\n"
         f"💰 Всего в банке: {fmt_sum(total)} сум\n\n"
-        f"Можно написать голосом или текстом:\n"
+        f"Можно написать текстом:\n"
         f"• банк процент 52 005,73\n"
         f"• банк вклад плюс 500 000\n"
         f"• банк счет 575 556"
@@ -367,7 +365,7 @@ async def report(message, mode):
     for t, amount, category, comment, date_str in rows:
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-        except:
+        except Exception:
             continue
 
         if dt < start:
@@ -512,7 +510,7 @@ async def expense_btn(message: types.Message):
     if not is_allowed(message):
         return
     user_state[message.from_user.id] = "expense"
-    await message.answer("Введи расход или отправь голос\nНапример: школа 20 000 купил пирожки")
+    await message.answer("Введи расход\nНапример: школа 20 000 купил пирожки")
 
 
 @dp.message_handler(lambda m: m.text == "📊 Сегодня")
@@ -581,60 +579,10 @@ async def voice_handler(message: types.Message):
         await message.answer("⛔ Доступ запрещён")
         return
 
-    try:
-        os.makedirs("voice/ogg", exist_ok=True)
-        os.makedirs("voice/wav", exist_ok=True)
-
-        file = await bot.get_file(message.voice.file_id)
-
-        ogg_path = f"voice/ogg/{message.voice.file_id}.ogg"
-        wav_path = f"voice/wav/{message.voice.file_id}.wav"
-
-        await bot.download_file(file.file_path, ogg_path)
-
-        subprocess.run(
-            [
-                FFMPEG_PATH,
-                "-y",
-                "-i", ogg_path,
-                "-ar", "16000",
-                "-ac", "1",
-                wav_path
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
-
-        wf = wave.open(wav_path, "rb")
-        rec = KaldiRecognizer(model, wf.getframerate())
-
-        text = ""
-
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0:
-                break
-
-            if rec.AcceptWaveform(data):
-                result = json.loads(rec.Result())
-                text += " " + result.get("text", "")
-
-        result = json.loads(rec.FinalResult())
-        text += " " + result.get("text", "")
-        text = text.strip()
-
-        await message.answer(f"🎙 Распознано: {text}")
-
-        if not text:
-            await message.answer("❌ Не смог распознать голос")
-            return
-
-        await process_text(message, text)
-
-    except Exception as e:
-        logging.error(e)
-        await message.answer("❌ Ошибка при обработке голоса")
+    await message.answer(
+        "🎙 Голосовые сообщения временно отключены на Render.\n"
+        "Пока пиши расход или приход текстом."
+    )
 
 
 @dp.message_handler()
