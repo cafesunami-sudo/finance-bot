@@ -75,5 +75,5 @@ async def start(message: types.Message):
 
 # ================== WEBHOOK ==================
 
-e__ == "__main__":
+if __name__ == "__main__":
     main()
