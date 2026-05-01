@@ -2,32 +2,25 @@ import os
 import re
 import sqlite3
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# ================== TOKEN / WEBHOOK ==================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден. Добавь BOT_TOKEN в Render Environment Variables.")
+    raise RuntimeError("BOT_TOKEN не найден")
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else ""
 
-# ================== НАСТРОЙКИ ==================
-
 ALLOWED_USER_ID = 137602775
 
 DEFAULT_BANK_DEPOSIT = 88288796
-DEFAULT_BANK_ACCOUNT = 575556
+DEFAULT_BANK_ACCOUNT = 52005.73
 DEFAULT_BANK_PERCENT = 52005.73
-
-# Узбекистанское время: UTC+5
-UZ_TZ = timezone(timedelta(hours=5))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -59,21 +52,40 @@ CREATE TABLE IF NOT EXISTS bank (
 
 conn.commit()
 
+# ================== ВОССТАНОВЛЕНИЕ ДАННЫХ ==================
 
-async def send(message: types.Message, text: str, reply_markup=None):
-    await bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+RESTORED_DATA = [
+    ("income", 575556, "прочее", "восстановлено", "2026-04-29 16:29:20"),
+    ("expense", 40000, "здоровье", "аптека купили лекарство для брата", "2026-04-29 22:08:35"),
+    ("expense", 40400, "магазин", "магазин купил молоко", "2026-04-29 22:33:24"),
+    ("expense", 10000, "школа", "школа купил пирожки", "2026-04-30 15:19:51"),
+    ("expense", 60000, "магазин", "магазин", "2026-04-30 20:44:50"),
+    ("expense", 50000, "дом", "за мусор", "2026-05-01 11:43:48"),
+    ("expense", 100000, "дом", "за свет", "2026-05-01 11:50:31"),
+    ("expense", 13000, "школа", "купил пирожки", "2026-05-01 16:57:55"),
+]
 
+for item in RESTORED_DATA:
+    t_type, amount, category, comment, date = item
+    cursor.execute(
+        """
+        SELECT id FROM transactions
+        WHERE type=? AND amount=? AND category=? AND comment=? AND date=?
+        """,
+        item
+    )
+    exists = cursor.fetchone()
+    if not exists:
+        cursor.execute(
+            "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
+            item
+        )
 
-def is_allowed(message: types.Message) -> bool:
-    return bool(message.from_user and message.from_user.id == ALLOWED_USER_ID)
-
-
-def now_uz():
-    return datetime.now(UZ_TZ)
+conn.commit()
 
 
 def bank_get(name, default=0):
-    cursor.execute("SELECT value FROM bank WHERE name = ?", (name,))
+    cursor.execute("SELECT value FROM bank WHERE name=?", (name,))
     row = cursor.fetchone()
     if row is None:
         cursor.execute("INSERT INTO bank (name, value) VALUES (?, ?)", (name, default))
@@ -83,10 +95,7 @@ def bank_get(name, default=0):
 
 
 def bank_set(name, value):
-    cursor.execute(
-        "INSERT OR REPLACE INTO bank (name, value) VALUES (?, ?)",
-        (name, value)
-    )
+    cursor.execute("INSERT OR REPLACE INTO bank (name, value) VALUES (?, ?)", (name, value))
     conn.commit()
 
 
@@ -103,7 +112,11 @@ kb.row(KeyboardButton("💰 Остаток"), KeyboardButton("🏦 Банк"), K
 
 user_state = {}
 
-# ================== ФОРМАТ ==================
+# ================== ПОМОЩНИКИ ==================
+
+def now_uz():
+    return datetime.utcnow() + timedelta(hours=5)
+
 
 def fmt_sum(value):
     value = float(value)
@@ -113,131 +126,53 @@ def fmt_sum(value):
 
 
 def normalize_text(text):
-    text = (text or "").lower().strip()
+    text = (text or "").lower()
     text = text.replace("ё", "е")
     text = text.replace(",", ".")
-    return text
+    return text.strip()
 
 
 def extract_number(text):
     text = normalize_text(text)
-
-    digit_match = re.search(r"\d+(?:[\s\d]*\d)?(?:[.,]\d+)?", text)
-    if digit_match:
-        raw = digit_match.group(0).replace(" ", "").replace(",", ".")
-        try:
-            return float(raw)
-        except Exception:
-            pass
-
-    words = {
-        "ноль": 0,
-        "один": 1, "одна": 1,
-        "два": 2, "две": 2,
-        "три": 3,
-        "четыре": 4,
-        "пять": 5,
-        "шесть": 6,
-        "семь": 7,
-        "восемь": 8,
-        "девять": 9,
-        "десять": 10,
-        "одиннадцать": 11,
-        "двенадцать": 12,
-        "тринадцать": 13,
-        "четырнадцать": 14,
-        "пятнадцать": 15,
-        "шестнадцать": 16,
-        "семнадцать": 17,
-        "восемнадцать": 18,
-        "девятнадцать": 19,
-        "двадцать": 20,
-        "тридцать": 30,
-        "сорок": 40,
-        "пятьдесят": 50,
-        "шестьдесят": 60,
-        "семьдесят": 70,
-        "восемьдесят": 80,
-        "девяносто": 90,
-        "сто": 100,
-        "двести": 200,
-        "триста": 300,
-        "четыреста": 400,
-        "пятьсот": 500,
-        "шестьсот": 600,
-        "семьсот": 700,
-        "восемьсот": 800,
-        "девятьсот": 900,
-    }
-
-    total = 0
-    current = 0
-
-    for word in text.split():
-        if word in words:
-            current += words[word]
-        elif word in ["тысяч", "тысяча", "тысячи"]:
-            if current == 0:
-                current = 1
-            total += current * 1000
-            current = 0
-        elif word in ["миллион", "миллиона", "миллионов"]:
-            if current == 0:
-                current = 1
-            total += current * 1000000
-            current = 0
-
-    total += current
-    return float(total) if total > 0 else None
+    match = re.search(r"\d+(?:[\s\d]*\d)?(?:[.,]\d+)?", text)
+    if match:
+        raw = match.group(0).replace(" ", "").replace(",", ".")
+        return float(raw)
+    return None
 
 
 def detect_category(text):
     text = normalize_text(text)
 
-    categories = {
-        "такси": ["такси", "яндекс", "yandex"],
-        "еда": ["еда", "обед", "ужин", "завтрак", "плов", "самса"],
-        "кафе": ["кафе", "ресторан", "кофе"],
-        "магазин": ["магазин", "корзинка", "маркет", "базар"],
-        "заправка": ["заправка", "бензин", "газ", "топливо"],
-        "школа": ["школа", "сыну", "дочке", "ребенку", "пирожки"],
-        "интернет": ["интернет", "uztelecom", "wifi", "вайфай"],
-        "дом": ["дом", "квартира", "коммуналка", "мусор"],
-        "офис": ["офис", "работа"],
-        "одежда": ["одежда", "брюки", "рубашка", "обувь", "куртка"],
-        "ремонт машины": ["ремонт машины", "машина", "авто", "сервис"],
-        "благотворительность": ["благотворительность", "помощь"],
-        "мечеть": ["мечеть", "садака", "пожертвование"],
-        "здоровье": ["аптека", "лекарство", "врач", "больница"],
-        "семья": ["семья", "жена", "мама", "папа"],
-        "долг": ["долг", "занял", "вернул"],
-        "банк": ["банк", "вклад", "счет", "счёт", "процент"],
-    }
-
-    for category, keys in categories.items():
-        for key in keys:
-            if key in text:
-                return category
+    if any(x in text for x in ["такси", "яндекс"]):
+        return "такси"
+    if any(x in text for x in ["школа", "пирожки", "сыну"]):
+        return "школа"
+    if any(x in text for x in ["магазин", "маркет", "молоко"]):
+        return "магазин"
+    if any(x in text for x in ["аптека", "лекарство", "врач"]):
+        return "здоровье"
+    if any(x in text for x in ["мусор", "свет", "коммунал", "дом"]):
+        return "дом"
+    if any(x in text for x in ["банк", "процент", "счет", "счёт"]):
+        return "банк"
 
     return "прочее"
 
 
-def remove_amount_words(text):
+def clean_comment(text):
     text = normalize_text(text)
     text = re.sub(r"\d+(?:[\s\d]*\d)?(?:[.,]\d+)?", "", text)
-    amount_words = [
-        "сум", "тысяч", "тысяча", "тысячи", "миллион", "миллиона", "миллионов",
-        "один", "одна", "два", "две", "три", "четыре", "пять", "шесть",
-        "семь", "восемь", "девять", "десять", "одиннадцать", "двенадцать",
-        "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать",
-        "семнадцать", "восемнадцать", "девятнадцать", "двадцать", "тридцать",
-        "сорок", "пятьдесят", "шестьдесят", "семьдесят", "восемьдесят",
-        "девяносто", "сто", "двести", "триста", "четыреста", "пятьсот",
-        "шестьсот", "семьсот", "восемьсот", "девятьсот"
-    ]
-    for w in amount_words:
-        text = re.sub(rf"\b{w}\b", "", text)
-    return " ".join(text.split())
+    text = text.replace("сум", "")
+    return " ".join(text.split()) or "без комментария"
+
+
+async def send(message: types.Message, text: str, reply_markup=None):
+    await bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+
+
+def is_allowed(message: types.Message):
+    return bool(message.from_user and message.from_user.id == ALLOWED_USER_ID)
 
 
 def save_transaction(t_type, amount, category, comment):
@@ -250,84 +185,10 @@ def save_transaction(t_type, amount, category, comment):
 
 # ================== БАНК ==================
 
-async def process_bank_command(message, text):
-    text = normalize_text(text)
-
-    deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
-    account = bank_get("account", DEFAULT_BANK_ACCOUNT)
-    percent = bank_get("percent", DEFAULT_BANK_PERCENT)
-
-    amount = extract_number(text)
-
-    if "процент" in text:
-        if amount is None:
-            await send(message, "❌ Не понял сумму процента")
-            return
-
-        percent = amount
-        account += amount
-
-        bank_set("percent", percent)
-        bank_set("account", account)
-
-        await send(
-            message,
-            f"🏦 Процент начислен\n\n"
-            f"📈 Процент: {fmt_sum(percent)} сум\n"
-            f"💳 На счёте: {fmt_sum(account)} сум"
-        )
-        return
-
-    if "вклад" in text:
-        if amount is None:
-            await send(message, "❌ Не понял сумму вклада")
-            return
-
-        if "плюс" in text or "добав" in text:
-            deposit += amount
-        elif "минус" in text or "снять" in text:
-            deposit -= amount
-        else:
-            deposit = amount
-
-        bank_set("deposit", deposit)
-
-        await send(
-            message,
-            f"🏦 Вклад обновлён\n\n"
-            f"💼 Вклад: {fmt_sum(deposit)} сум"
-        )
-        return
-
-    if "счет" in text or "счёт" in text:
-        if amount is None:
-            await send(message, "❌ Не понял сумму счёта")
-            return
-
-        if "плюс" in text or "добав" in text:
-            account += amount
-        elif "минус" in text or "снять" in text:
-            account -= amount
-        else:
-            account = amount
-
-        bank_set("account", account)
-
-        await send(
-            message,
-            f"🏦 Счёт обновлён\n\n"
-            f"💳 На счёте: {fmt_sum(account)} сум"
-        )
-        return
-
-    await bank_report(message)
-
-
 async def bank_report(message):
     deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
     account = bank_get("account", DEFAULT_BANK_ACCOUNT)
     percent = bank_get("percent", DEFAULT_BANK_PERCENT)
-    total = deposit + account
 
     await send(
         message,
@@ -335,19 +196,62 @@ async def bank_report(message):
         f"💼 Вклад: {fmt_sum(deposit)} сум\n"
         f"💳 На счёте: {fmt_sum(account)} сум\n"
         f"📈 Последний процент: {fmt_sum(percent)} сум\n\n"
-        f"💰 Всего в банке: {fmt_sum(total)} сум\n\n"
-        f"Можно написать текстом:\n"
+        f"💰 Всего в банке: {fmt_sum(deposit + account)} сум\n\n"
+        f"Можно написать:\n"
+        f"• банк счет 52 005,73\n"
         f"• банк процент 52 005,73\n"
-        f"• банк вклад плюс 500 000\n"
-        f"• банк счет 575 556",
-        reply_markup=kb
+        f"• банк вклад 88 288 796"
     )
+
+
+async def process_bank_command(message, text):
+    text = normalize_text(text)
+    amount = extract_number(text)
+
+    deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
+    account = bank_get("account", DEFAULT_BANK_ACCOUNT)
+    percent = bank_get("percent", DEFAULT_BANK_PERCENT)
+
+    if amount is None:
+        await bank_report(message)
+        return
+
+    if "процент" in text:
+        percent = amount
+        account += amount
+        bank_set("percent", percent)
+        bank_set("account", account)
+
+        save_transaction("income", amount, "банк", "процент банка")
+
+        await send(
+            message,
+            f"🏦 Процент начислен\n\n"
+            f"📈 Процент: {fmt_sum(percent)} сум\n"
+            f"💳 На счёте: {fmt_sum(account)} сум\n"
+            f"➕ Также добавлено в приход"
+        )
+        return
+
+    if "вклад" in text:
+        deposit = amount
+        bank_set("deposit", deposit)
+        await send(message, f"🏦 Вклад обновлён\n\n💼 Вклад: {fmt_sum(deposit)} сум")
+        return
+
+    if "счет" in text or "счёт" in text:
+        account = amount
+        bank_set("account", account)
+        await send(message, f"🏦 Счёт обновлён\n\n💳 На счёте: {fmt_sum(account)} сум")
+        return
+
+    await bank_report(message)
 
 
 # ================== ОТЧЁТЫ ==================
 
 async def report(message, mode):
-    now = now_uz().replace(tzinfo=None)
+    now = now_uz()
 
     if mode == "today":
         title = "📊 Сегодня"
@@ -362,7 +266,7 @@ async def report(message, mode):
         title = "💰 Всё время"
         start = datetime(2000, 1, 1)
 
-    cursor.execute("SELECT type, amount, category, comment, date FROM transactions ORDER BY id ASC")
+    cursor.execute("SELECT type, amount, category, comment, date FROM transactions ORDER BY date ASC")
     rows = cursor.fetchall()
 
     income = 0
@@ -386,7 +290,7 @@ async def report(message, mode):
             categories[category] = categories.get(category, 0) + amount
 
         sign = "➕" if t == "income" else "➖"
-        lines.append(f"{sign} {fmt_sum(amount)} — {category} — {comment}")
+        lines.append(f"{sign} {fmt_sum(amount)} — {category} — {comment} ({dt.strftime('%d.%m %H:%M')})")
 
     text = (
         f"{title}\n\n"
@@ -402,15 +306,15 @@ async def report(message, mode):
 
     if lines:
         text += "\n🧾 Последние записи:\n"
-        for line in lines[-30:]:
+        for line in lines[-15:]:
             text += line + "\n"
     else:
-        text += "\n🧾 Записей за этот период нет.\n"
+        text += "\n🧾 Записей за этот период нет."
 
-    await send(message, text, reply_markup=kb)
+    await send(message, text)
 
 
-# ================== ОБРАБОТКА ТЕКСТА ==================
+# ================== ОБРАБОТКА ==================
 
 async def process_text(message, raw_text):
     if not is_allowed(message):
@@ -418,9 +322,7 @@ async def process_text(message, raw_text):
         return
 
     text = normalize_text(raw_text)
-    logging.info("MESSAGE FROM %s: %s", message.from_user.id, text)
 
-    # Кнопки ловим по словам, чтобы эмодзи или другая клавиатура не ломали обработку
     if "сегодня" in text:
         await report(message, "today")
         return
@@ -429,64 +331,30 @@ async def process_text(message, raw_text):
         await report(message, "week")
         return
 
-    if "месяц" in text or "месяц" in text or "месяц" in text:
+    if "месяц" in text:
         await report(message, "month")
         return
 
-    if "остаток" in text or "все время" in text or "всё время" in text:
+    if "остаток" in text:
         await report(message, "all")
         return
 
-    if "удалить" in text:
-        await delete_last_transaction(message)
-        return
-
-    if text.startswith("банк") or "банк" in text:
+    if "банк" in text:
         await process_bank_command(message, text)
         return
 
-    if text.startswith("приход"):
-        amount = extract_number(text)
-        if amount is None:
-            await send(message, "❌ Не понял сумму прихода", reply_markup=kb)
-            return
-
-        clean = remove_amount_words(text.replace("приход", ""))
-        category = detect_category(clean)
-        comment = clean or category
-
-        save_transaction("income", amount, category, comment)
-
-        await send(
-            message,
-            f"✅ Сохранено:\n"
-            f"приход — {fmt_sum(amount)} сум\n"
-            f"Категория: {category}\n"
-            f"Комментарий: {comment}",
-            reply_markup=kb
-        )
+    if "удал" in text:
+        await delete_last(message)
         return
 
-    if text.startswith("расход"):
-        amount = extract_number(text)
-        if amount is None:
-            await send(message, "❌ Не понял сумму расхода", reply_markup=kb)
-            return
+    if "приход" in text:
+        user_state[message.from_user.id] = "income"
+        await send(message, "Введи приход\nНапример: 1 500 000 зарплата")
+        return
 
-        clean = remove_amount_words(text.replace("расход", ""))
-        category = detect_category(clean)
-        comment = clean or category
-
-        save_transaction("expense", amount, category, comment)
-
-        await send(
-            message,
-            f"✅ Сохранено:\n"
-            f"расход — {fmt_sum(amount)} сум\n"
-            f"Категория: {category}\n"
-            f"Комментарий: {comment}",
-            reply_markup=kb
-        )
+    if "расход" in text:
+        user_state[message.from_user.id] = "expense"
+        await send(message, "Введи расход\nНапример: школа 20 000 купил пирожки")
         return
 
     state = user_state.get(message.from_user.id)
@@ -494,12 +362,11 @@ async def process_text(message, raw_text):
     if state in ["income", "expense"]:
         amount = extract_number(text)
         if amount is None:
-            await send(message, "❌ Не понял сумму", reply_markup=kb)
+            await send(message, "❌ Не понял сумму")
             return
 
-        clean = remove_amount_words(text)
-        category = detect_category(clean)
-        comment = clean or category
+        category = detect_category(text)
+        comment = clean_comment(text)
 
         save_transaction(state, amount, category, comment)
         user_state[message.from_user.id] = None
@@ -511,8 +378,7 @@ async def process_text(message, raw_text):
             f"✅ Сохранено:\n"
             f"{type_ru} — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
-            f"Комментарий: {comment}",
-            reply_markup=kb
+            f"Комментарий: {comment}"
         )
         return
 
@@ -521,21 +387,20 @@ async def process_text(message, raw_text):
         "Используй кнопки или напиши:\n"
         "расход 20 000 такси\n"
         "приход 1 500 000 зарплата\n"
-        "банк процент 52 005,73",
-        reply_markup=kb
+        "банк процент 52 005,73"
     )
 
 
-async def delete_last_transaction(message):
+async def delete_last(message):
     cursor.execute("SELECT id, type, amount, category, comment FROM transactions ORDER BY id DESC LIMIT 1")
     row = cursor.fetchone()
 
     if not row:
-        await send(message, "Удалять нечего", reply_markup=kb)
+        await send(message, "Удалять нечего")
         return
 
     record_id, t, amount, category, comment = row
-    cursor.execute("DELETE FROM transactions WHERE id = ?", (record_id,))
+    cursor.execute("DELETE FROM transactions WHERE id=?", (record_id,))
     conn.commit()
 
     type_ru = "приход" if t == "income" else "расход"
@@ -544,8 +409,7 @@ async def delete_last_transaction(message):
         message,
         f"🗑 Удалено:\n"
         f"{type_ru} — {fmt_sum(amount)} сум\n"
-        f"{category} — {comment}",
-        reply_markup=kb
+        f"{category} — {comment}"
     )
 
 
@@ -571,7 +435,7 @@ async def voice_handler(message: types.Message):
         await send(message, "⛔ Доступ запрещён")
         return
 
-    await send(message, "🎙 Голос пока отключён на Render. Пиши текстом: расход 20 000 такси", reply_markup=kb)
+    await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
 
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
@@ -587,26 +451,20 @@ async def handle_index(request):
 
 async def handle_health(request):
     if WEBHOOK_URL:
-        await bot.delete_webhook(drop_pending_updates=False)
         await bot.set_webhook(WEBHOOK_URL)
     return web.Response(text="OK webhook refreshed")
 
 
 async def handle_webhook(request):
-    try:
-        data = await request.json()
-        logging.info("WEBHOOK UPDATE RECEIVED")
-        update = types.Update.to_object(data)
-        await dp.process_update(update)
-        return web.Response(text="ok")
-    except Exception as e:
-        logging.exception("WEBHOOK ERROR: %s", e)
-        return web.Response(text="error", status=500)
+    data = await request.json()
+    update = types.Update.to_object(data)
+    await dp.process_update(update)
+    return web.Response(text="ok")
 
 
 async def on_startup(app):
     if not WEBHOOK_URL:
-        raise RuntimeError("RENDER_EXTERNAL_HOSTNAME не найден. Это должен быть Render Web Service.")
+        raise RuntimeError("RENDER_EXTERNAL_HOSTNAME не найден")
     await bot.delete_webhook(drop_pending_updates=False)
     await bot.set_webhook(WEBHOOK_URL)
     print("Webhook set:", WEBHOOK_URL)
