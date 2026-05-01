@@ -75,5 +75,38 @@ async def start(message: types.Message):
 
 # ================== WEBHOOK ==================
 
+async def handle_webhook(request):
+    data = await request.json()
+    update = types.Update.to_object(data)
+    await dp.process_update(update)
+    return web.Response(text="ok")
+
+
+async def handle_index(request):
+    return web.Response(text="Finance bot is running")
+
+
+async def on_startup(app):
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
+    print("Webhook set:", WEBHOOK_URL)
+
+
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.close()
+
+
+def main():
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    port = int(os.getenv("PORT", 10000))
+    web.run_app(app, host="0.0.0.0", port=port)
+
+
 if __name__ == "__main__":
     main()
