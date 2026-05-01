@@ -507,7 +507,7 @@ async def start(message: types.Message):
     await send(message, "💰 Финансовый бот готов", reply_markup=kb)
 
 
-@dp.message_handler(lambda m: m.text == "➕ Приход")
+@dp.message_handler(lambda m: m.text == "➕ Приход", content_types=types.ContentType.TEXT)
 async def income_btn(message: types.Message):
     if not is_allowed(message):
         return
@@ -515,7 +515,7 @@ async def income_btn(message: types.Message):
     await send(message, "Введи приход\nНапример: 1 500 000 зарплата")
 
 
-@dp.message_handler(lambda m: m.text == "➖ Расход")
+@dp.message_handler(lambda m: m.text == "➖ Расход", content_types=types.ContentType.TEXT)
 async def expense_btn(message: types.Message):
     if not is_allowed(message):
         return
@@ -523,42 +523,42 @@ async def expense_btn(message: types.Message):
     await send(message, "Введи расход\nНапример: школа 20 000 купил пирожки")
 
 
-@dp.message_handler(lambda m: m.text == "📊 Сегодня")
+@dp.message_handler(lambda m: m.text == "📊 Сегодня", content_types=types.ContentType.TEXT)
 async def today_btn(message: types.Message):
     if not is_allowed(message):
         return
     await report(message, "today")
 
 
-@dp.message_handler(lambda m: m.text == "📅 Неделя")
+@dp.message_handler(lambda m: m.text == "📅 Неделя", content_types=types.ContentType.TEXT)
 async def week_btn(message: types.Message):
     if not is_allowed(message):
         return
     await report(message, "week")
 
 
-@dp.message_handler(lambda m: m.text == "🗓 Месяц")
+@dp.message_handler(lambda m: m.text == "🗓 Месяц", content_types=types.ContentType.TEXT)
 async def month_btn(message: types.Message):
     if not is_allowed(message):
         return
     await report(message, "month")
 
 
-@dp.message_handler(lambda m: m.text == "💰 Остаток")
+@dp.message_handler(lambda m: m.text == "💰 Остаток", content_types=types.ContentType.TEXT)
 async def balance_btn(message: types.Message):
     if not is_allowed(message):
         return
     await report(message, "all")
 
 
-@dp.message_handler(lambda m: m.text == "🏦 Банк")
+@dp.message_handler(lambda m: m.text == "🏦 Банк", content_types=types.ContentType.TEXT)
 async def bank_btn(message: types.Message):
     if not is_allowed(message):
         return
     await bank_report(message)
 
 
-@dp.message_handler(lambda m: m.text == "🗑 Удалить")
+@dp.message_handler(lambda m: m.text == "🗑 Удалить", content_types=types.ContentType.TEXT)
 async def delete_btn(message: types.Message):
     if not is_allowed(message):
         return
@@ -593,7 +593,7 @@ async def voice_handler(message: types.Message):
     await send(message, "🎙 Голос пока отключён на Render. Пиши текстом: расход 20 000 такси")
 
 
-@dp.message_handler()
+@dp.message_handler(content_types=types.ContentType.TEXT)
 async def text_handler(message: types.Message):
     if not is_allowed(message):
         await send(message, "⛔ Доступ запрещён")
