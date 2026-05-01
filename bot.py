@@ -2,7 +2,7 @@ import os
 import re
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
@@ -26,15 +26,10 @@ DEFAULT_BANK_DEPOSIT = 88288796
 DEFAULT_BANK_ACCOUNT = 575556
 DEFAULT_BANK_PERCENT = 52005.73
 
+# Узбекистанское время: UTC+5
+UZ_TZ = timezone(timedelta(hours=5))
+
 logging.basicConfig(level=logging.INFO)
-
-# Render работает по UTC, а нам нужно время Узбекистана.
-TASHKENT_OFFSET = timedelta(hours=5)
-
-
-def now_tashkent():
-    return datetime.utcnow() + TASHKENT_OFFSET
-
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
@@ -71,6 +66,10 @@ async def send(message: types.Message, text: str, reply_markup=None):
 
 def is_allowed(message: types.Message) -> bool:
     return bool(message.from_user and message.from_user.id == ALLOWED_USER_ID)
+
+
+def now_uz():
+    return datetime.now(UZ_TZ)
 
 
 def bank_get(name, default=0):
@@ -114,7 +113,7 @@ def fmt_sum(value):
 
 
 def normalize_text(text):
-    text = (text or "").lower()
+    text = (text or "").lower().strip()
     text = text.replace("ё", "е")
     text = text.replace(",", ".")
     return text
@@ -244,7 +243,7 @@ def remove_amount_words(text):
 def save_transaction(t_type, amount, category, comment):
     cursor.execute(
         "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
-        (t_type, amount, category, comment, now_tashkent().strftime("%Y-%m-%d %H:%M:%S"))
+        (t_type, amount, category, comment, now_uz().strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.commit()
 
@@ -340,14 +339,15 @@ async def bank_report(message):
         f"Можно написать текстом:\n"
         f"• банк процент 52 005,73\n"
         f"• банк вклад плюс 500 000\n"
-        f"• банк счет 575 556"
+        f"• банк счет 575 556",
+        reply_markup=kb
     )
 
 
 # ================== ОТЧЁТЫ ==================
 
 async def report(message, mode):
-    now = now_tashkent()
+    now = now_uz().replace(tzinfo=None)
 
     if mode == "today":
         title = "📊 Сегодня"
@@ -362,11 +362,7 @@ async def report(message, mode):
         title = "💰 Всё время"
         start = datetime(2000, 1, 1)
 
-    cursor.execute("""
-        SELECT type, amount, category, comment, date
-        FROM transactions
-        ORDER BY date ASC, id ASC
-    """)
+    cursor.execute("SELECT type, amount, category, comment, date FROM transactions ORDER BY id ASC")
     rows = cursor.fetchall()
 
     income = 0
@@ -376,22 +372,12 @@ async def report(message, mode):
 
     for t, amount, category, comment, date_str in rows:
         try:
-            dt_saved = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
         except Exception:
             continue
 
-        # Новые записи сохраняются уже по времени Узбекистана.
-        # Старые записи могли сохраниться по времени Render/UTC.
-        # Поэтому для отчёта проверяем оба варианта, чтобы сегодняшние расходы не пропали.
-        dt_as_tashkent = dt_saved
-        dt_old_utc_as_tashkent = dt_saved + TASHKENT_OFFSET
-
-        if mode == "today":
-            if not (dt_as_tashkent >= start or dt_old_utc_as_tashkent >= start):
-                continue
-        else:
-            if dt_as_tashkent < start and dt_old_utc_as_tashkent < start:
-                continue
+        if dt < start:
+            continue
 
         if t == "income":
             income += amount
@@ -416,12 +402,13 @@ async def report(message, mode):
 
     if lines:
         text += "\n🧾 Последние записи:\n"
-        for line in lines[-20:]:
+        for line in lines[-30:]:
             text += line + "\n"
     else:
-        text += "\nЗаписей за этот период нет.\n"
+        text += "\n🧾 Записей за этот период нет.\n"
 
-    await send(message, text)
+    await send(message, text, reply_markup=kb)
+
 
 # ================== ОБРАБОТКА ТЕКСТА ==================
 
@@ -431,6 +418,28 @@ async def process_text(message, raw_text):
         return
 
     text = normalize_text(raw_text)
+    logging.info("MESSAGE FROM %s: %s", message.from_user.id, text)
+
+    # Кнопки ловим по словам, чтобы эмодзи или другая клавиатура не ломали обработку
+    if "сегодня" in text:
+        await report(message, "today")
+        return
+
+    if "неделя" in text:
+        await report(message, "week")
+        return
+
+    if "месяц" in text or "месяц" in text or "месяц" in text:
+        await report(message, "month")
+        return
+
+    if "остаток" in text or "все время" in text or "всё время" in text:
+        await report(message, "all")
+        return
+
+    if "удалить" in text:
+        await delete_last_transaction(message)
+        return
 
     if text.startswith("банк") or "банк" in text:
         await process_bank_command(message, text)
@@ -439,7 +448,7 @@ async def process_text(message, raw_text):
     if text.startswith("приход"):
         amount = extract_number(text)
         if amount is None:
-            await send(message, "❌ Не понял сумму прихода")
+            await send(message, "❌ Не понял сумму прихода", reply_markup=kb)
             return
 
         clean = remove_amount_words(text.replace("приход", ""))
@@ -453,14 +462,15 @@ async def process_text(message, raw_text):
             f"✅ Сохранено:\n"
             f"приход — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
-            f"Комментарий: {comment}"
+            f"Комментарий: {comment}",
+            reply_markup=kb
         )
         return
 
     if text.startswith("расход"):
         amount = extract_number(text)
         if amount is None:
-            await send(message, "❌ Не понял сумму расхода")
+            await send(message, "❌ Не понял сумму расхода", reply_markup=kb)
             return
 
         clean = remove_amount_words(text.replace("расход", ""))
@@ -474,7 +484,8 @@ async def process_text(message, raw_text):
             f"✅ Сохранено:\n"
             f"расход — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
-            f"Комментарий: {comment}"
+            f"Комментарий: {comment}",
+            reply_markup=kb
         )
         return
 
@@ -483,7 +494,7 @@ async def process_text(message, raw_text):
     if state in ["income", "expense"]:
         amount = extract_number(text)
         if amount is None:
-            await send(message, "❌ Не понял сумму")
+            await send(message, "❌ Не понял сумму", reply_markup=kb)
             return
 
         clean = remove_amount_words(text)
@@ -500,7 +511,8 @@ async def process_text(message, raw_text):
             f"✅ Сохранено:\n"
             f"{type_ru} — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
-            f"Комментарий: {comment}"
+            f"Комментарий: {comment}",
+            reply_markup=kb
         )
         return
 
@@ -509,7 +521,31 @@ async def process_text(message, raw_text):
         "Используй кнопки или напиши:\n"
         "расход 20 000 такси\n"
         "приход 1 500 000 зарплата\n"
-        "банк процент 52 005,73"
+        "банк процент 52 005,73",
+        reply_markup=kb
+    )
+
+
+async def delete_last_transaction(message):
+    cursor.execute("SELECT id, type, amount, category, comment FROM transactions ORDER BY id DESC LIMIT 1")
+    row = cursor.fetchone()
+
+    if not row:
+        await send(message, "Удалять нечего", reply_markup=kb)
+        return
+
+    record_id, t, amount, category, comment = row
+    cursor.execute("DELETE FROM transactions WHERE id = ?", (record_id,))
+    conn.commit()
+
+    type_ru = "приход" if t == "income" else "расход"
+
+    await send(
+        message,
+        f"🗑 Удалено:\n"
+        f"{type_ru} — {fmt_sum(amount)} сум\n"
+        f"{category} — {comment}",
+        reply_markup=kb
     )
 
 
@@ -529,98 +565,17 @@ async def start(message: types.Message):
     await send(message, "💰 Финансовый бот готов", reply_markup=kb)
 
 
-@dp.message_handler(lambda m: m.text == "➕ Приход", content_types=types.ContentType.TEXT)
-async def income_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    user_state[message.from_user.id] = "income"
-    await send(message, "Введи приход\nНапример: 1 500 000 зарплата")
-
-
-@dp.message_handler(lambda m: m.text == "➖ Расход", content_types=types.ContentType.TEXT)
-async def expense_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    user_state[message.from_user.id] = "expense"
-    await send(message, "Введи расход\nНапример: школа 20 000 купил пирожки")
-
-
-@dp.message_handler(lambda m: m.text == "📊 Сегодня", content_types=types.ContentType.TEXT)
-async def today_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    await report(message, "today")
-
-
-@dp.message_handler(lambda m: m.text == "📅 Неделя", content_types=types.ContentType.TEXT)
-async def week_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    await report(message, "week")
-
-
-@dp.message_handler(lambda m: m.text == "🗓 Месяц", content_types=types.ContentType.TEXT)
-async def month_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    await report(message, "month")
-
-
-@dp.message_handler(lambda m: m.text == "💰 Остаток", content_types=types.ContentType.TEXT)
-async def balance_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    await report(message, "all")
-
-
-@dp.message_handler(lambda m: m.text == "🏦 Банк", content_types=types.ContentType.TEXT)
-async def bank_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-    await bank_report(message)
-
-
-@dp.message_handler(lambda m: m.text == "🗑 Удалить", content_types=types.ContentType.TEXT)
-async def delete_btn(message: types.Message):
-    if not is_allowed(message):
-        return
-
-    cursor.execute("SELECT id, type, amount, category, comment FROM transactions ORDER BY id DESC LIMIT 1")
-    row = cursor.fetchone()
-
-    if not row:
-        await send(message, "Удалять нечего")
-        return
-
-    record_id, t, amount, category, comment = row
-    cursor.execute("DELETE FROM transactions WHERE id = ?", (record_id,))
-    conn.commit()
-
-    type_ru = "приход" if t == "income" else "расход"
-
-    await send(
-        message,
-        f"🗑 Удалено:\n"
-        f"{type_ru} — {fmt_sum(amount)} сум\n"
-        f"{category} — {comment}"
-    )
-
-
 @dp.message_handler(content_types=types.ContentType.VOICE)
 async def voice_handler(message: types.Message):
     if not is_allowed(message):
         await send(message, "⛔ Доступ запрещён")
         return
 
-    await send(message, "🎙 Голос пока отключён на Render. Пиши текстом: расход 20 000 такси")
+    await send(message, "🎙 Голос пока отключён на Render. Пиши текстом: расход 20 000 такси", reply_markup=kb)
 
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
 async def text_handler(message: types.Message):
-    if not is_allowed(message):
-        await send(message, "⛔ Доступ запрещён")
-        return
-
     await process_text(message, message.text)
 
 
@@ -632,15 +587,21 @@ async def handle_index(request):
 
 async def handle_health(request):
     if WEBHOOK_URL:
+        await bot.delete_webhook(drop_pending_updates=False)
         await bot.set_webhook(WEBHOOK_URL)
     return web.Response(text="OK webhook refreshed")
 
 
 async def handle_webhook(request):
-    data = await request.json()
-    update = types.Update.to_object(data)
-    await dp.process_update(update)
-    return web.Response(text="ok")
+    try:
+        data = await request.json()
+        logging.info("WEBHOOK UPDATE RECEIVED")
+        update = types.Update.to_object(data)
+        await dp.process_update(update)
+        return web.Response(text="ok")
+    except Exception as e:
+        logging.exception("WEBHOOK ERROR: %s", e)
+        return web.Response(text="error", status=500)
 
 
 async def on_startup(app):
