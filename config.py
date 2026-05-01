@@ -1,0 +1,4 @@
+
+
+SALARY_DAY = 5
+ADVANCE_DAY = 20
