@@ -68,15 +68,15 @@ user_state = {}
 # ================== HANDLERS ==================
 @dp.message_handler(commands=["start"])
 async def start(message: types.Message):
-   if message.from_user.id != ALLOWED_USER_ID:
-    await bot.send_message(message.chat.id, "⛔ Доступ запрещён")
-    return
+    if message.from_user.id != ALLOWED_USER_ID:
+        await bot.send_message(message.chat.id, "⛔ Доступ запрещён")
+        return
 
-await bot.send_message(
-    message.chat.id,
-    "💰 Финансовый бот работает через webhook",
-    reply_markup=kb
-)
+    await bot.send_message(
+        message.chat.id,
+        "💰 Финансовый бот работает через webhook",
+        reply_markup=kb
+    )
 # ================== WEBHOOK ==================
 
 async def handle_webhook(request):
