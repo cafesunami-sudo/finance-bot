@@ -75,21 +75,5 @@ async def start(message: types.Message):
 
 # ================== WEBHOOK ==================
 
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-    print("Webhook set:", WEBHOOK_URL)
-
-async def on_shutdown(app):
-    await bot.delete_webhook()
-
-def main():
-    app = web.Application()
-    app.router.add_post(WEBHOOK_PATH, dp.dispatch)
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    port = int(os.getenv("PORT", 10000))
-    web.run_app(app, host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
+e__ == "__main__":
     main()
