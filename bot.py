@@ -28,6 +28,14 @@ DEFAULT_BANK_PERCENT = 52005.73
 
 logging.basicConfig(level=logging.INFO)
 
+# Render работает по UTC, а нам нужно время Узбекистана.
+TASHKENT_OFFSET = timedelta(hours=5)
+
+
+def now_tashkent():
+    return datetime.utcnow() + TASHKENT_OFFSET
+
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
@@ -236,7 +244,7 @@ def remove_amount_words(text):
 def save_transaction(t_type, amount, category, comment):
     cursor.execute(
         "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
-        (t_type, amount, category, comment, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        (t_type, amount, category, comment, now_tashkent().strftime("%Y-%m-%d %H:%M:%S"))
     )
     conn.commit()
 
@@ -339,7 +347,7 @@ async def bank_report(message):
 # ================== ОТЧЁТЫ ==================
 
 async def report(message, mode):
-    now = datetime.now()
+    now = now_tashkent()
 
     if mode == "today":
         title = "📊 Сегодня"
@@ -354,7 +362,11 @@ async def report(message, mode):
         title = "💰 Всё время"
         start = datetime(2000, 1, 1)
 
-    cursor.execute("SELECT type, amount, category, comment, date FROM transactions")
+    cursor.execute("""
+        SELECT type, amount, category, comment, date
+        FROM transactions
+        ORDER BY date ASC, id ASC
+    """)
     rows = cursor.fetchall()
 
     income = 0
@@ -364,12 +376,22 @@ async def report(message, mode):
 
     for t, amount, category, comment, date_str in rows:
         try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            dt_saved = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
         except Exception:
             continue
 
-        if dt < start:
-            continue
+        # Новые записи сохраняются уже по времени Узбекистана.
+        # Старые записи могли сохраниться по времени Render/UTC.
+        # Поэтому для отчёта проверяем оба варианта, чтобы сегодняшние расходы не пропали.
+        dt_as_tashkent = dt_saved
+        dt_old_utc_as_tashkent = dt_saved + TASHKENT_OFFSET
+
+        if mode == "today":
+            if not (dt_as_tashkent >= start or dt_old_utc_as_tashkent >= start):
+                continue
+        else:
+            if dt_as_tashkent < start and dt_old_utc_as_tashkent < start:
+                continue
 
         if t == "income":
             income += amount
@@ -394,11 +416,12 @@ async def report(message, mode):
 
     if lines:
         text += "\n🧾 Последние записи:\n"
-        for line in lines[-10:]:
+        for line in lines[-20:]:
             text += line + "\n"
+    else:
+        text += "\nЗаписей за этот период нет.\n"
 
     await send(message, text)
-
 
 # ================== ОБРАБОТКА ТЕКСТА ==================
 
