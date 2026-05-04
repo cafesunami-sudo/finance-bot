@@ -103,12 +103,12 @@ def bank_set(name, value):
 # Один раз после этого обновления исправляем банк:
 # счет = 0, последний процент = 0. Потом при следующих деплоях уже не сбрасываем.
 def init_bank_once():
-    initialized = bank_get("bank_logic_v2_initialized", 0)
+    initialized = bank_get("bank_logic_v3_sms_initialized", 0)
     if not initialized:
         bank_set("deposit", DEFAULT_BANK_DEPOSIT)
         bank_set("account", DEFAULT_BANK_ACCOUNT)
         bank_set("percent", DEFAULT_BANK_PERCENT)
-        bank_set("bank_logic_v2_initialized", 1)
+        bank_set("bank_logic_v3_sms_initialized", 1)
     else:
         bank_get("deposit", DEFAULT_BANK_DEPOSIT)
         bank_get("account", DEFAULT_BANK_ACCOUNT)
@@ -153,6 +153,68 @@ def extract_number(text):
         raw = match.group(0).replace(" ", "").replace(",", ".")
         return float(raw)
     return None
+
+
+def parse_amount_value(value):
+    if value is None:
+        return None
+    raw = str(value).strip().replace(" ", "").replace(",", ".")
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def parse_bank_sms(raw_text):
+    """
+    Понимает SMS банка такого вида:
+    "... to'langan % - 156017.19 UZS. ... qoldiq - 364630.00 UZS. 04.05.2026"
+    Возвращает процент, остаток на счете и дату.
+    """
+    text = normalize_text(raw_text)
+    text = re.sub(r"\s+", " ", text)
+
+    if "qoldiq" not in text:
+        return None
+    if "to'langan" not in text and "tolangan" not in text and "to‘langan" not in text:
+        return None
+
+    percent_match = re.search(
+        r"(?:to'langan|tolangan|to‘langan)\s*%\s*[-–—]?\s*([0-9][0-9\s.,]*)\s*uzs",
+        text
+    )
+    balance_match = re.search(
+        r"qoldiq\s*[-–—]?\s*([0-9][0-9\s.,]*)\s*uzs",
+        text
+    )
+    date_match = re.search(r"(\d{2}\.\d{2}\.\d{4})", text)
+
+    if not percent_match or not balance_match:
+        return None
+
+    percent_amount = parse_amount_value(percent_match.group(1))
+    balance_amount = parse_amount_value(balance_match.group(1))
+
+    if percent_amount is None or balance_amount is None:
+        return None
+
+    return {
+        "percent": percent_amount,
+        "balance": balance_amount,
+        "date": date_match.group(1) if date_match else now_uz().strftime("%d.%m.%Y")
+    }
+
+
+def transaction_exists(t_type, amount, category, comment):
+    cursor.execute(
+        """
+        SELECT id FROM transactions
+        WHERE type=? AND amount=? AND category=? AND comment=?
+        LIMIT 1
+        """,
+        (t_type, amount, category, comment)
+    )
+    return cursor.fetchone() is not None
 
 
 def detect_category(text):
@@ -212,6 +274,33 @@ def add_bank_percent(amount):
     return account
 
 
+async def process_bank_sms(message, sms_data):
+    percent_amount = sms_data["percent"]
+    balance_amount = sms_data["balance"]
+    sms_date = sms_data["date"]
+
+    bank_set("percent", percent_amount)
+    bank_set("account", balance_amount)
+
+    comment = f"процент банка sms, остаток {fmt_sum(balance_amount)}, дата {sms_date}"
+
+    if not transaction_exists("income", percent_amount, "банк", comment):
+        save_transaction("income", percent_amount, "банк", comment)
+        saved_text = "➕ Добавлено в приход"
+    else:
+        saved_text = "ℹ️ Такая SMS уже была сохранена, повторно в приход не добавил"
+
+    await send(
+        message,
+        f"🏦 SMS банка обработана\n\n"
+        f"📈 Процент банка: {fmt_sum(percent_amount)} сум\n"
+        f"💳 Остаток на счёте: {fmt_sum(balance_amount)} сум\n"
+        f"📅 Дата SMS: {sms_date}\n"
+        f"{saved_text}\n\n"
+        f"💰 Всего в банке: {fmt_sum(bank_get('deposit', DEFAULT_BANK_DEPOSIT) + balance_amount)} сум"
+    )
+
+
 async def bank_report(message):
     deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
     account = bank_get("account", DEFAULT_BANK_ACCOUNT)
@@ -227,7 +316,8 @@ async def bank_report(message):
         f"Можно написать:\n"
         f"• банк процент 52 005,73\n"
         f"• банк счет 0\n"
-        f"• банк вклад 88 288 796"
+        f"• банк вклад 88 288 796\n"
+        f"• или переслать SMS банка с to'langan % и qoldiq"
     )
 
 
@@ -345,6 +435,11 @@ async def process_text(message, raw_text):
         return
 
     text = normalize_text(raw_text)
+
+    sms_data = parse_bank_sms(raw_text)
+    if sms_data:
+        await process_bank_sms(message, sms_data)
+        return
 
     if "сегодня" in text:
         await report(message, "today")
@@ -474,6 +569,21 @@ async def voice_handler(message: types.Message):
         return
 
     await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
+
+
+@dp.message_handler(content_types=types.ContentType.PHOTO)
+async def photo_handler(message: types.Message):
+    if not is_allowed(message):
+        await send(message, "⛔ Доступ запрещён")
+        return
+
+    caption = message.caption or ""
+    sms_data = parse_bank_sms(caption)
+    if sms_data:
+        await process_bank_sms(message, sms_data)
+        return
+
+    await send(message, "📷 Скрин получил, но текст SMS с картинки я сам прочитать не могу. Скопируй SMS текстом и отправь сюда.")
 
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
