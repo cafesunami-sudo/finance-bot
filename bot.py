@@ -18,9 +18,10 @@ WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else
 
 ALLOWED_USER_ID = 137602775
 
+# Вклад остается как был. Счет и последний процент начинаются с 0.
 DEFAULT_BANK_DEPOSIT = 88288796
-DEFAULT_BANK_ACCOUNT = 52005.73
-DEFAULT_BANK_PERCENT = 52005.73
+DEFAULT_BANK_ACCOUNT = 0
+DEFAULT_BANK_PERCENT = 0
 
 logging.basicConfig(level=logging.INFO)
 
@@ -99,9 +100,22 @@ def bank_set(name, value):
     conn.commit()
 
 
-bank_get("deposit", DEFAULT_BANK_DEPOSIT)
-bank_get("account", DEFAULT_BANK_ACCOUNT)
-bank_get("percent", DEFAULT_BANK_PERCENT)
+# Один раз после этого обновления исправляем банк:
+# счет = 0, последний процент = 0. Потом при следующих деплоях уже не сбрасываем.
+def init_bank_once():
+    initialized = bank_get("bank_logic_v2_initialized", 0)
+    if not initialized:
+        bank_set("deposit", DEFAULT_BANK_DEPOSIT)
+        bank_set("account", DEFAULT_BANK_ACCOUNT)
+        bank_set("percent", DEFAULT_BANK_PERCENT)
+        bank_set("bank_logic_v2_initialized", 1)
+    else:
+        bank_get("deposit", DEFAULT_BANK_DEPOSIT)
+        bank_get("account", DEFAULT_BANK_ACCOUNT)
+        bank_get("percent", DEFAULT_BANK_PERCENT)
+
+
+init_bank_once()
 
 # ================== КНОПКИ ==================
 
@@ -185,6 +199,19 @@ def save_transaction(t_type, amount, category, comment):
 
 # ================== БАНК ==================
 
+def is_bank_percent_text(text):
+    text = normalize_text(text)
+    return "банк" in text and "процент" in text
+
+
+def add_bank_percent(amount):
+    account = bank_get("account", DEFAULT_BANK_ACCOUNT)
+    account += amount
+    bank_set("account", account)
+    bank_set("percent", amount)
+    return account
+
+
 async def bank_report(message):
     deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
     account = bank_get("account", DEFAULT_BANK_ACCOUNT)
@@ -198,8 +225,8 @@ async def bank_report(message):
         f"📈 Последний процент: {fmt_sum(percent)} сум\n\n"
         f"💰 Всего в банке: {fmt_sum(deposit + account)} сум\n\n"
         f"Можно написать:\n"
-        f"• банк счет 52 005,73\n"
         f"• банк процент 52 005,73\n"
+        f"• банк счет 0\n"
         f"• банк вклад 88 288 796"
     )
 
@@ -217,17 +244,13 @@ async def process_bank_command(message, text):
         return
 
     if "процент" in text:
-        percent = amount
-        account += amount
-        bank_set("percent", percent)
-        bank_set("account", account)
-
+        account = add_bank_percent(amount)
         save_transaction("income", amount, "банк", "процент банка")
 
         await send(
             message,
-            f"🏦 Процент начислен\n\n"
-            f"📈 Процент: {fmt_sum(percent)} сум\n"
+            f"🏦 Процент банка добавлен\n\n"
+            f"📈 Процент: {fmt_sum(amount)} сум\n"
             f"💳 На счёте: {fmt_sum(account)} сум\n"
             f"➕ Также добавлено в приход"
         )
@@ -242,7 +265,7 @@ async def process_bank_command(message, text):
     if "счет" in text or "счёт" in text:
         account = amount
         bank_set("account", account)
-        await send(message, f"🏦 Счёт обновлён\n\n💳 На счёте: {fmt_sum(account)} сум")
+        await send(message, f"🏦 Счёт установлен\n\n💳 На счёте: {fmt_sum(account)} сум")
         return
 
     await bank_report(message)
@@ -371,6 +394,12 @@ async def process_text(message, raw_text):
         save_transaction(state, amount, category, comment)
         user_state[message.from_user.id] = None
 
+        # Если приход записан как процент банка, добавляем сумму на банковский счёт.
+        bank_note = ""
+        if state == "income" and is_bank_percent_text(text):
+            account = add_bank_percent(amount)
+            bank_note = f"\n💳 На счёте банка: {fmt_sum(account)} сум"
+
         type_ru = "приход" if state == "income" else "расход"
 
         await send(
@@ -379,6 +408,7 @@ async def process_text(message, raw_text):
             f"{type_ru} — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
             f"Комментарий: {comment}"
+            f"{bank_note}"
         )
         return
 
@@ -403,6 +433,13 @@ async def delete_last(message):
     cursor.execute("DELETE FROM transactions WHERE id=?", (record_id,))
     conn.commit()
 
+    bank_note = ""
+    if t == "income" and category == "банк" and "процент" in normalize_text(comment):
+        account = bank_get("account", DEFAULT_BANK_ACCOUNT)
+        account = max(0, account - amount)
+        bank_set("account", account)
+        bank_note = f"\n💳 Счёт банка откатан: {fmt_sum(account)} сум"
+
     type_ru = "приход" if t == "income" else "расход"
 
     await send(
@@ -410,6 +447,7 @@ async def delete_last(message):
         f"🗑 Удалено:\n"
         f"{type_ru} — {fmt_sum(amount)} сум\n"
         f"{category} — {comment}"
+        f"{bank_note}"
     )
 
 
@@ -432,7 +470,7 @@ async def start(message: types.Message):
 @dp.message_handler(content_types=types.ContentType.VOICE)
 async def voice_handler(message: types.Message):
     if not is_allowed(message):
-        await send(message, "⛔ Доступ запрещён")
+        await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
         return
 
     await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
