@@ -18,11 +18,61 @@ WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else
 
 ALLOWED_USER_ID = 137602775
 
-# Вклад остается как был. Счет и последний процент начинаются с 0.
+# Банк отдельно
 DEFAULT_BANK_DEPOSIT = 88288796
 DEFAULT_BANK_ACCOUNT = 0
 DEFAULT_BANK_PERCENT = 0
-DEFAULT_CARD_BALANCE = 0
+
+# Мой обычный баланс: карта/наличные, не банк
+DEFAULT_MY_BALANCE = 0
+
+# Кредиты
+CREDITS = {
+    "кредит ТБС банк": {
+        "key": "credit_tbs_balance",
+        "total": 14209240.81,
+        "paid": 7557562.12,
+        "balance": 6651642.69,
+        "monthly": 1209240.81,
+        "pay_day": 12,
+    },
+    "кредит Узум банк": {
+        "key": "credit_uzum_balance",
+        "total": 6804000,
+        "paid": 3402000,
+        "balance": 3402000,
+        "monthly": 567000,
+        "pay_day": 25,
+    },
+    "кредит Миллий банк": {
+        "key": "credit_milliy_balance",
+        "total": 72000000,
+        "paid": 18690649,
+        "balance": 53309351,
+        "monthly": 2324838.79,
+        "pay_day": 5,
+    },
+}
+
+EXPENSE_CATEGORIES = [
+    "магазин",
+    "рынок",
+    "такси",
+    "школа",
+    "аптека",
+    "коммунальные",
+    "Жалал",
+    "билет",
+    "Фуркат",
+    "заправка пропан",
+    "заправка бензин",
+    "кредитная карта",
+    "одежда",
+    "кредит Узум банк",
+    "кредит Миллий банк",
+    "кредит ТБС банк",
+    "прочее",
+]
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,17 +108,16 @@ conn.commit()
 
 RESTORED_DATA = [
     ("income", 575556, "прочее", "восстановлено", "2026-04-29 16:29:20"),
-    ("expense", 40000, "здоровье", "аптека купили лекарство для брата", "2026-04-29 22:08:35"),
+    ("expense", 40000, "аптека", "аптека купили лекарство для брата", "2026-04-29 22:08:35"),
     ("expense", 40400, "магазин", "магазин купил молоко", "2026-04-29 22:33:24"),
     ("expense", 10000, "школа", "школа купил пирожки", "2026-04-30 15:19:51"),
     ("expense", 60000, "магазин", "магазин", "2026-04-30 20:44:50"),
-    ("expense", 50000, "дом", "за мусор", "2026-05-01 11:43:48"),
-    ("expense", 100000, "дом", "за свет", "2026-05-01 11:50:31"),
+    ("expense", 50000, "коммунальные", "за мусор", "2026-05-01 11:43:48"),
+    ("expense", 100000, "коммунальные", "за свет", "2026-05-01 11:50:31"),
     ("expense", 13000, "школа", "купил пирожки", "2026-05-01 16:57:55"),
 ]
 
 for item in RESTORED_DATA:
-    t_type, amount, category, comment, date = item
     cursor.execute(
         """
         SELECT id FROM transactions
@@ -97,27 +146,17 @@ def bank_get(name, default=0):
 
 
 def bank_set(name, value):
-    cursor.execute("INSERT OR REPLACE INTO bank (name, value) VALUES (?, ?)", (name, value))
+    cursor.execute("INSERT OR REPLACE INTO bank (name, value) VALUES (?, ?)", (name, float(value)))
     conn.commit()
 
 
-# Один раз после этого обновления исправляем банк:
-# счет = 0, последний процент = 0. Потом при следующих деплоях уже не сбрасываем.
-def init_bank_once():
-    initialized = bank_get("bank_logic_v3_sms_initialized", 0)
-    if not initialized:
-        bank_set("deposit", DEFAULT_BANK_DEPOSIT)
-        bank_set("account", DEFAULT_BANK_ACCOUNT)
-        bank_set("percent", DEFAULT_BANK_PERCENT)
-        bank_set("bank_logic_v3_sms_initialized", 1)
-    else:
-        bank_get("deposit", DEFAULT_BANK_DEPOSIT)
-        bank_get("account", DEFAULT_BANK_ACCOUNT)
-        bank_get("percent", DEFAULT_BANK_PERCENT)
-bank_get("card_balance", DEFAULT_CARD_BALANCE)
+bank_get("deposit", DEFAULT_BANK_DEPOSIT)
+bank_get("account", DEFAULT_BANK_ACCOUNT)
+bank_get("percent", DEFAULT_BANK_PERCENT)
+bank_get("my_balance", DEFAULT_MY_BALANCE)
 
-
-init_bank_once()
+for credit_name, info in CREDITS.items():
+    bank_get(info["key"], info["balance"])
 
 # ================== КНОПКИ ==================
 
@@ -126,16 +165,34 @@ kb.row(KeyboardButton("➕ Приход"), KeyboardButton("➖ Расход"))
 kb.row(KeyboardButton("📊 Сегодня"), KeyboardButton("📅 Неделя"), KeyboardButton("🗓 Месяц"))
 kb.row(KeyboardButton("💰 Остаток"), KeyboardButton("🏦 Банк"), KeyboardButton("🗑 Удалить"))
 
+
+def make_keyboard(buttons, cols=2):
+    keyboard = []
+    row = []
+    for btn in buttons:
+        row.append(KeyboardButton(str(btn)))
+        if len(row) == cols:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+category_kb = make_keyboard(EXPENSE_CATEGORIES + ["🏠 Меню"], cols=2)
+
 user_state = {}
+pending_expense = {}
 
 # ================== ПОМОЩНИКИ ==================
+
 
 def now_uz():
     return datetime.utcnow() + timedelta(hours=5)
 
 
 def fmt_sum(value):
-    value = float(value)
+    value = float(value or 0)
     if value.is_integer():
         return f"{int(value):,}".replace(",", " ")
     return f"{value:,.2f}".replace(",", " ").replace(".", ",")
@@ -144,32 +201,18 @@ def fmt_sum(value):
 def normalize_text(text):
     text = (text or "").lower()
     text = text.replace("ё", "е")
-    text = text.replace(",", ".")
     return text.strip()
 
 
-def extract_number(text):
-    text = normalize_text(text)
-    match = re.search(r"\d+(?:[\s\d]*\d)?(?:[.,]\d+)?", text)
-    if match:
-        raw = match.group(0).replace(" ", "").replace(",", ".")
-        return float(raw)
-    return None
+def parse_money(raw):
+    raw = str(raw or "").strip()
+    raw = raw.replace(" ", "").replace("\u00a0", "")
 
-
-def parse_amount_value(value):
-    if value is None:
-        return None
-
-    raw = str(value).strip().replace(" ", "")
-
-    # Форматы банковских SMS бывают разные:
-    # 156017.19  -> 156017.19
-    # 98.560,00  -> 98560.00
-    # 50.000,00  -> 50000.00
     if "," in raw and "." in raw:
+        # 48.000,00 => 48000.00
         if raw.rfind(",") > raw.rfind("."):
             raw = raw.replace(".", "").replace(",", ".")
+        # 48,000.00 => 48000.00
         else:
             raw = raw.replace(",", "")
     elif "," in raw:
@@ -180,143 +223,84 @@ def parse_amount_value(value):
             raw = raw.replace(",", "")
     elif "." in raw:
         parts = raw.split(".")
-        if len(parts) > 2:
-            raw = "".join(parts[:-1]) + "." + parts[-1]
-        elif len(parts[-1]) != 2:
+        if len(parts[-1]) == 2:
+            raw = raw
+        else:
             raw = raw.replace(".", "")
 
-    try:
-        return float(raw)
-    except Exception:
-        return None
+    return float(raw)
 
 
-def parse_bank_sms(raw_text):
-    """
-    Понимает SMS банка такого вида:
-    "... to'langan % - 156017.19 UZS. ... qoldiq - 364630.00 UZS. 04.05.2026"
-    Возвращает процент, остаток на счете и дату.
-    """
-    text = normalize_text(raw_text)
-    text = re.sub(r"\s+", " ", text)
-
-    if "qoldiq" not in text:
-        return None
-    if "to'langan" not in text and "tolangan" not in text and "to‘langan" not in text:
-        return None
-
-    percent_match = re.search(
-        r"(?:to'langan|tolangan|to‘langan)\s*%\s*[-–—]?\s*([0-9][0-9\s.,]*)\s*uzs",
-        text
-    )
-    balance_match = re.search(
-        r"qoldiq\s*[-–—]?\s*([0-9][0-9\s.,]*)\s*uzs",
-        text
-    )
-    date_match = re.search(r"(\d{2}\.\d{2}\.\d{4})", text)
-
-    if not percent_match or not balance_match:
-        return None
-
-    percent_amount = parse_amount_value(percent_match.group(1))
-    balance_amount = parse_amount_value(balance_match.group(1))
-
-    if percent_amount is None or balance_amount is None:
-        return None
-
-    return {
-        "percent": percent_amount,
-        "balance": balance_amount,
-        "date": date_match.group(1) if date_match else now_uz().strftime("%d.%m.%Y")
-    }
-
-
-def parse_card_sms(raw_text):
-    """
-    Понимает SMS по обычной карте:
-    Пополнение + 98.560,00 UZS ... 12:47 02.05.2026
-    Оплата - 50.000,00 UZS ... 15:06 02.05.2026
-    Возвращает тип операции, сумму и дату/время.
-    """
-    text_original = raw_text or ""
-    text = normalize_text(text_original)
-    text = re.sub(r"\s+", " ", text)
-
-    is_income = "пополнение" in text or "popolnen" in text
-    is_expense = "оплата" in text or "oplata" in text
-
-    if not (is_income or is_expense):
-        return None
-
-    amount_match = re.search(r"[+\-]?\s*([0-9][0-9\s.,]*)\s*uzs", text)
-    if not amount_match:
-        return None
-
-    amount = parse_amount_value(amount_match.group(1))
-    if amount is None:
-        return None
-
-    date_match = re.search(r"(\d{2}:\d{2})\s+(\d{2}\.\d{2}\.\d{4})", text)
-    if date_match:
-        sms_time = date_match.group(1)
-        sms_date = date_match.group(2)
-    else:
-        sms_time = now_uz().strftime("%H:%M")
-        sms_date = now_uz().strftime("%d.%m.%Y")
-
-    merchant = "карта"
-    lines = [line.strip() for line in text_original.splitlines() if line.strip()]
-    for line in lines:
-        low = normalize_text(line)
-        if "tbc" in low or "humo" in low or "uzcard" in low or "*" in low:
-            merchant = line.strip()
-            break
-
-    return {
-        "type": "income" if is_income else "expense",
-        "amount": amount,
-        "date": sms_date,
-        "time": sms_time,
-        "merchant": merchant
-    }
-
-
-def transaction_exists(t_type, amount, category, comment):
-    cursor.execute(
-        """
-        SELECT id FROM transactions
-        WHERE type=? AND amount=? AND category=? AND comment=?
-        LIMIT 1
-        """,
-        (t_type, amount, category, comment)
-    )
-    return cursor.fetchone() is not None
+def extract_number(text):
+    match = re.search(r"\d[\d\s.,]*", str(text or ""))
+    if match:
+        try:
+            return parse_money(match.group(0))
+        except:
+            return None
+    return None
 
 
 def detect_category(text):
     text = normalize_text(text)
 
-    if any(x in text for x in ["такси", "яндекс"]):
-        return "такси"
-    if any(x in text for x in ["школа", "пирожки", "сыну"]):
-        return "школа"
-    if any(x in text for x in ["магазин", "маркет", "молоко"]):
+    if "магаз" in text:
         return "магазин"
-    if any(x in text for x in ["аптека", "лекарство", "врач"]):
-        return "здоровье"
-    if any(x in text for x in ["мусор", "свет", "коммунал", "дом"]):
-        return "дом"
-    if any(x in text for x in ["банк", "процент", "счет", "счёт"]):
-        return "банк"
+    if "рынок" in text or "bozor" in text:
+        return "рынок"
+    if "такси" in text or "yandex" in text or "яндекс" in text:
+        return "такси"
+    if "школ" in text:
+        return "школа"
+    if "аптек" in text or "лекар" in text:
+        return "аптека"
+    if any(x in text for x in ["свет", "мусор", "коммун", "газ", "вода"]):
+        return "коммунальные"
+    if "жалал" in text:
+        return "Жалал"
+    if "билет" in text:
+        return "билет"
+    if "фуркат" in text:
+        return "Фуркат"
+    if "пропан" in text:
+        return "заправка пропан"
+    if "бензин" in text:
+        return "заправка бензин"
+    if "кредитн" in text:
+        return "кредитная карта"
+    if "одежд" in text:
+        return "одежда"
+    if "узум" in text:
+        return "кредит Узум банк"
+    if "миллий" in text:
+        return "кредит Миллий банк"
+    if "тбс" in text or "tbs" in text:
+        return "кредит ТБС банк"
 
     return "прочее"
 
 
 def clean_comment(text):
     text = normalize_text(text)
-    text = re.sub(r"\d+(?:[\s\d]*\d)?(?:[.,]\d+)?", "", text)
-    text = text.replace("сум", "")
+    text = re.sub(r"\d[\d\s.,]*", "", text)
+    text = text.replace("сум", "").replace("uzs", "")
     return " ".join(text.split()) or "без комментария"
+
+
+def extract_sms_datetime(text):
+    text = str(text or "")
+    date_match = re.search(r"(\d{2}\.\d{2}\.\d{4})", text)
+    time_match = re.search(r"(\d{1,2}:\d{2})(?::\d{2})?", text)
+
+    if date_match:
+        date_text = date_match.group(1)
+        time_text = time_match.group(1) if time_match else now_uz().strftime("%H:%M")
+        try:
+            return datetime.strptime(f"{date_text} {time_text}", "%d.%m.%Y %H:%M").strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            pass
+
+    return now_uz().strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def send(message: types.Message, text: str, reply_markup=None):
@@ -327,95 +311,169 @@ def is_allowed(message: types.Message):
     return bool(message.from_user and message.from_user.id == ALLOWED_USER_ID)
 
 
-def save_transaction(t_type, amount, category, comment):
+def save_transaction(t_type, amount, category, comment, date_value=None):
+    if date_value is None:
+        date_value = now_uz().strftime("%Y-%m-%d %H:%M:%S")
+
     cursor.execute(
         "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
-        (t_type, amount, category, comment, now_uz().strftime("%Y-%m-%d %H:%M:%S"))
+        (t_type, amount, category, comment, date_value)
     )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def update_transaction(record_id, category=None, comment=None):
+    if category is not None:
+        cursor.execute("UPDATE transactions SET category=? WHERE id=?", (category, record_id))
+    if comment is not None:
+        cursor.execute("UPDATE transactions SET comment=? WHERE id=?", (comment, record_id))
     conn.commit()
 
 
-# ================== БАНК ==================
+def apply_credit_payment(category, amount):
+    if category not in CREDITS:
+        return None
 
-def is_bank_percent_text(text):
-    text = normalize_text(text)
-    return "банк" in text and "процент" in text
+    info = CREDITS[category]
+    old_balance = bank_get(info["key"], info["balance"])
+    new_balance = max(0, old_balance - amount)
+    bank_set(info["key"], new_balance)
+    return {
+        "name": category,
+        "paid": amount,
+        "old_balance": old_balance,
+        "new_balance": new_balance,
+        "monthly": info["monthly"],
+        "pay_day": info["pay_day"],
+    }
 
 
-def add_bank_percent(amount):
-    account = bank_get("account", DEFAULT_BANK_ACCOUNT)
-    account += amount
-    bank_set("account", account)
-    bank_set("percent", amount)
-    return account
+def rollback_credit_payment(category, amount):
+    if category not in CREDITS:
+        return
+    info = CREDITS[category]
+    balance = bank_get(info["key"], info["balance"])
+    bank_set(info["key"], balance + amount)
 
 
-async def process_bank_sms(message, sms_data):
-    percent_amount = sms_data["percent"]
-    balance_amount = sms_data["balance"]
-    sms_date = sms_data["date"]
+# ================== SMS ==================
 
-    bank_set("percent", percent_amount)
-    bank_set("account", balance_amount)
+
+def parse_bank_percent_sms(text):
+    raw = str(text or "")
+    low = normalize_text(raw)
+
+    if "to'langan %" not in low and "tolangan %" not in low and "omonati" not in low:
+        return None
+
+    percent_match = re.search(r"(?:to'?langan\s*%|tolangan\s*%)\s*-\s*([\d\s.,]+)\s*uzs", low, re.I)
+    if not percent_match:
+        percent_match = re.search(r"%\s*-\s*([\d\s.,]+)\s*uzs", low, re.I)
+
+    balance_match = re.search(r"qoldiq\s*-\s*([\d\s.,]+)\s*uzs", low, re.I)
+
+    if not percent_match:
+        return None
+
+    percent = parse_money(percent_match.group(1))
+    account = parse_money(balance_match.group(1)) if balance_match else None
+    date_value = extract_sms_datetime(raw)
+
+    return {
+        "percent": percent,
+        "account": account,
+        "date": date_value,
+    }
+
+
+def parse_card_sms(text):
+    raw = str(text or "")
+    low = normalize_text(raw)
+
+    is_income = any(x in low for x in ["пополнение", "поступление", "kirim", "to'ldirish", "toldirish"])
+    is_expense = any(x in low for x in ["оплата", "списание", "xarid", "purchase", "tolov", "to'lov"])
+
+    if not is_income and not is_expense:
+        return None
+
+    # Берем первую сумму перед UZS/сум.
+    amount_match = re.search(r"([\d\s.,]+)\s*(?:uzs|сум|so['‘’`]?m)", low, re.I)
+    if not amount_match:
+        return None
+
+    amount = parse_money(amount_match.group(1))
+    date_value = extract_sms_datetime(raw)
+
+    return {
+        "type": "income" if is_income else "expense",
+        "amount": amount,
+        "date": date_value,
+    }
+
+
+async def handle_bank_percent_sms(message, parsed):
+    percent = parsed["percent"]
+    account_from_sms = parsed.get("account")
+
+    bank_set("percent", percent)
+    if account_from_sms is not None:
+        bank_set("account", account_from_sms)
+        account = account_from_sms
+    else:
+        account = bank_get("account", DEFAULT_BANK_ACCOUNT) + percent
+        bank_set("account", account)
+
+    save_transaction("income", percent, "банк", "процент банка", parsed.get("date"))
 
     await send(
         message,
         f"🏦 SMS банка обработана\n\n"
-        f"📈 Процент банка: {fmt_sum(percent_amount)} сум\n"
-        f"💳 Остаток на счёте: {fmt_sum(balance_amount)} сум\n"
-        f"📅 Дата SMS: {sms_date}\n\n"
-        f"ℹ️ В обычный приход/расход это не добавляется. Банк отдельно.\n"
-        f"💰 Всего в банке: {fmt_sum(bank_get('deposit', DEFAULT_BANK_DEPOSIT) + balance_amount)} сум"
+        f"📈 Процент: {fmt_sum(percent)} сум\n"
+        f"💳 На счёте банка: {fmt_sum(account)} сум\n\n"
+        f"ℹ️ В обычный отчет это не попадает, банк отдельно."
     )
 
 
-def card_balance_get():
-    return bank_get("card_balance", DEFAULT_CARD_BALANCE)
+async def handle_card_sms(message, parsed):
+    amount = parsed["amount"]
+    date_value = parsed["date"]
+    balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
 
+    if parsed["type"] == "income":
+        new_balance = balance + amount
+        bank_set("my_balance", new_balance)
+        save_transaction("income", amount, "пополнение", "пополнение карты", date_value)
+        await send(
+            message,
+            f"✅ Пополнение карты сохранено\n\n"
+            f"➕ Сумма: {fmt_sum(amount)} сум\n"
+            f"💳 Мой баланс: {fmt_sum(new_balance)} сум"
+        )
+        return
 
-def card_balance_set(value):
-    bank_set("card_balance", value)
-
-
-async def process_card_sms(message, sms_data):
-    t_type = sms_data["type"]
-    amount = sms_data["amount"]
-    sms_date = sms_data["date"]
-    sms_time = sms_data["time"]
-    merchant = sms_data["merchant"]
-
-    balance = card_balance_get()
-    if t_type == "income":
-        balance += amount
-        category = "пополнение карты"
-        comment = f"пополнение карты sms, {merchant}, дата {sms_date} {sms_time}"
-        title = "💳 Пополнение карты обработано"
-        sign_text = "➕ Приход"
-    else:
-        balance -= amount
-        category = "карта"
-        comment = f"оплата картой sms, {merchant}, дата {sms_date} {sms_time}"
-        title = "💳 Оплата картой обработана"
-        sign_text = "➖ Расход"
-
-    exists = transaction_exists(t_type, amount, category, comment)
-    if not exists:
-        save_transaction(t_type, amount, category, comment)
-        card_balance_set(balance)
-        saved_text = f"{sign_text} сохранён"
-    else:
-        balance = card_balance_get()
-        saved_text = "ℹ️ Такая SMS уже была сохранена, повторно не добавил"
+    # Расход по карте: сначала сохраняем, потом обязательно просим категорию.
+    new_balance = balance - amount
+    bank_set("my_balance", new_balance)
+    record_id = save_transaction("expense", amount, "ожидает категорию", "оплата картой", date_value)
+    pending_expense[message.from_user.id] = {
+        "record_id": record_id,
+        "amount": amount,
+        "balance": new_balance,
+    }
+    user_state[message.from_user.id] = "choose_expense_category"
 
     await send(
         message,
-        f"{title}\n\n"
-        f"💰 Сумма: {fmt_sum(amount)} сум\n"
-        f"📌 Детали: {merchant}\n"
-        f"📅 Дата: {sms_date} {sms_time}\n"
-        f"💳 Остаток карты по боту: {fmt_sum(balance)} сум\n"
-        f"{saved_text}"
+        f"➖ Оплата картой сохранена\n\n"
+        f"Сумма: {fmt_sum(amount)} сум\n"
+        f"💳 Мой баланс: {fmt_sum(new_balance)} сум\n\n"
+        f"Выбери категорию расхода:",
+        reply_markup=category_kb
     )
+
+
+# ================== БАНК ==================
 
 
 async def bank_report(message):
@@ -423,19 +481,31 @@ async def bank_report(message):
     account = bank_get("account", DEFAULT_BANK_ACCOUNT)
     percent = bank_get("percent", DEFAULT_BANK_PERCENT)
 
-    await send(
-        message,
+    text = (
         f"🏦 Банк\n\n"
         f"💼 Вклад: {fmt_sum(deposit)} сум\n"
-        f"💳 На счёте: {fmt_sum(account)} сум\n"
+        f"💳 На счёте банка: {fmt_sum(account)} сум\n"
         f"📈 Последний процент: {fmt_sum(percent)} сум\n\n"
         f"💰 Всего в банке: {fmt_sum(deposit + account)} сум\n\n"
-        f"Можно написать:\n"
-        f"• банк процент 52 005,73\n"
-        f"• банк счет 0\n"
-        f"• банк вклад 88 288 796\n"
-        f"• или переслать SMS банка с to'langan % и qoldiq"
+        f"💳 Мой баланс: {fmt_sum(bank_get('my_balance', DEFAULT_MY_BALANCE))} сум\n\n"
+        f"💳 Кредиты:\n"
     )
+
+    for credit_name, info in CREDITS.items():
+        balance = bank_get(info["key"], info["balance"])
+        text += (
+            f"• {credit_name}: осталось {fmt_sum(balance)} сум\n"
+            f"  Платёж: {fmt_sum(info['monthly'])} сум, до {info['pay_day']}-го числа\n"
+        )
+
+    text += (
+        f"\nМожно написать:\n"
+        f"• банк процент 52 005,73\n"
+        f"• банк счет 364 630\n"
+        f"• мой баланс 0"
+    )
+
+    await send(message, text)
 
 
 async def process_bank_command(message, text):
@@ -451,15 +521,18 @@ async def process_bank_command(message, text):
         return
 
     if "процент" in text:
-        account = add_bank_percent(amount)
+        percent = amount
+        account += amount
+        bank_set("percent", percent)
+        bank_set("account", account)
         save_transaction("income", amount, "банк", "процент банка")
 
         await send(
             message,
-            f"🏦 Процент банка добавлен\n\n"
-            f"📈 Процент: {fmt_sum(amount)} сум\n"
-            f"💳 На счёте: {fmt_sum(account)} сум\n"
-            f"➕ Также добавлено в приход"
+            f"🏦 Процент начислен\n\n"
+            f"📈 Процент: {fmt_sum(percent)} сум\n"
+            f"💳 На счёте банка: {fmt_sum(account)} сум\n\n"
+            f"ℹ️ В обычный отчет это не попадает."
         )
         return
 
@@ -472,13 +545,24 @@ async def process_bank_command(message, text):
     if "счет" in text or "счёт" in text:
         account = amount
         bank_set("account", account)
-        await send(message, f"🏦 Счёт установлен\n\n💳 На счёте: {fmt_sum(account)} сум")
+        await send(message, f"🏦 Счёт банка обновлён\n\n💳 На счёте банка: {fmt_sum(account)} сум")
         return
 
     await bank_report(message)
 
 
+async def process_my_balance_command(message, text):
+    amount = extract_number(text)
+    if amount is None:
+        await send(message, f"💳 Мой баланс: {fmt_sum(bank_get('my_balance', DEFAULT_MY_BALANCE))} сум")
+        return
+
+    bank_set("my_balance", amount)
+    await send(message, f"💳 Мой баланс обновлён: {fmt_sum(amount)} сум")
+
+
 # ================== ОТЧЁТЫ ==================
+
 
 async def report(message, mode):
     now = now_uz()
@@ -505,15 +589,16 @@ async def report(message, mode):
     lines = []
 
     for t, amount, category, comment, date_str in rows:
-        if normalize_text(category) == "банк":
-            continue
-
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
         except Exception:
             continue
 
         if dt < start:
+            continue
+
+        # Банк полностью отдельно: в Сегодня/Неделя/Месяц не показываем.
+        if category == "банк":
             continue
 
         if t == "income":
@@ -529,18 +614,17 @@ async def report(message, mode):
         f"{title}\n\n"
         f"➕ Приход: {fmt_sum(income)} сум\n"
         f"➖ Расход: {fmt_sum(expense)} сум\n"
-        f"💰 Остаток за период: {fmt_sum(income - expense)} сум\n"
-        f"💳 Остаток карты: {fmt_sum(card_balance_get())} сум\n"
+        f"💳 Мой баланс: {fmt_sum(bank_get('my_balance', DEFAULT_MY_BALANCE))} сум\n"
     )
 
     if categories:
-        text += "\n🏷 Категории расходов:\n"
+        text += "\n🏷 Расходы по категориям:\n"
         for cat, total in sorted(categories.items(), key=lambda x: x[1], reverse=True):
             text += f"• {cat}: {fmt_sum(total)} сум\n"
 
     if lines:
         text += "\n🧾 Последние записи:\n"
-        for line in lines[-15:]:
+        for line in lines[-20:]:
             text += line + "\n"
     else:
         text += "\n🧾 Записей за этот период нет."
@@ -550,30 +634,73 @@ async def report(message, mode):
 
 # ================== ОБРАБОТКА ==================
 
+
 async def process_text(message, raw_text):
     if not is_allowed(message):
         await send(message, "⛔ Доступ запрещён")
         return
 
     text = normalize_text(raw_text)
+    chat_id = message.from_user.id
 
-    sms_data = parse_bank_sms(raw_text)
-    if sms_data:
-        await process_bank_sms(message, sms_data)
+    if text == "🏠 меню":
+        user_state[chat_id] = None
+        pending_expense.pop(chat_id, None)
+        await send(message, "Меню", reply_markup=kb)
         return
 
-    card_sms_data = parse_card_sms(raw_text)
-    if card_sms_data:
-        await process_card_sms(message, card_sms_data)
-        return
+    if user_state.get(chat_id) == "choose_expense_category":
+        selected = raw_text.strip()
+        if selected not in EXPENSE_CATEGORIES:
+            await send(message, "Выбери категорию кнопкой.", reply_markup=category_kb)
+            return
 
-    if "карта счет" in text or "карта счёт" in text:
-        amount = extract_number(text)
-        if amount is None:
-            await send(message, f"💳 Остаток карты: {fmt_sum(card_balance_get())} сум")
+        pending = pending_expense.get(chat_id)
+        if not pending:
+            user_state[chat_id] = None
+            await send(message, "Нет расхода для выбора категории.", reply_markup=kb)
+            return
+
+        amount = pending["amount"]
+        update_transaction(pending["record_id"], category=selected, comment=selected)
+
+        credit_result = apply_credit_payment(selected, amount)
+        user_state[chat_id] = None
+        pending_expense.pop(chat_id, None)
+
+        if credit_result:
+            await send(
+                message,
+                f"✅ Категория сохранена: {selected}\n\n"
+                f"💳 Платёж по кредиту: {fmt_sum(amount)} сум\n"
+                f"📉 Осталось погасить: {fmt_sum(credit_result['new_balance'])} сум\n"
+                f"📅 Ежемесячный платёж: {fmt_sum(credit_result['monthly'])} сум\n"
+                f"🗓 Дата платежа: {credit_result['pay_day']}-е число каждого месяца",
+                reply_markup=kb
+            )
         else:
-            card_balance_set(amount)
-            await send(message, f"💳 Остаток карты установлен: {fmt_sum(amount)} сум")
+            await send(
+                message,
+                f"✅ Категория сохранена: {selected}\n"
+                f"💳 Мой баланс: {fmt_sum(bank_get('my_balance', DEFAULT_MY_BALANCE))} сум",
+                reply_markup=kb
+            )
+        return
+
+    # SMS банка: процент по вкладу
+    parsed_bank_sms = parse_bank_percent_sms(raw_text)
+    if parsed_bank_sms:
+        await handle_bank_percent_sms(message, parsed_bank_sms)
+        return
+
+    # SMS карты: пополнение или оплата
+    parsed_card_sms = parse_card_sms(raw_text)
+    if parsed_card_sms:
+        await handle_card_sms(message, parsed_card_sms)
+        return
+
+    if "мой баланс" in text:
+        await process_my_balance_command(message, raw_text)
         return
 
     if "сегодня" in text:
@@ -593,7 +720,7 @@ async def process_text(message, raw_text):
         return
 
     if "банк" in text:
-        await process_bank_command(message, text)
+        await process_bank_command(message, raw_text)
         return
 
     if "удал" in text:
@@ -601,45 +728,54 @@ async def process_text(message, raw_text):
         return
 
     if "приход" in text:
-        user_state[message.from_user.id] = "income"
+        user_state[chat_id] = "income"
         await send(message, "Введи приход\nНапример: 1 500 000 зарплата")
         return
 
     if "расход" in text:
-        user_state[message.from_user.id] = "expense"
-        await send(message, "Введи расход\nНапример: школа 20 000 купил пирожки")
+        user_state[chat_id] = "expense"
+        await send(message, "Введи расход\nНапример: магазин 20 000 продукты")
         return
 
-    state = user_state.get(message.from_user.id)
+    state = user_state.get(chat_id)
 
     if state in ["income", "expense"]:
-        amount = extract_number(text)
+        amount = extract_number(raw_text)
         if amount is None:
             await send(message, "❌ Не понял сумму")
             return
 
-        category = detect_category(text)
-        comment = clean_comment(text)
+        category = detect_category(raw_text)
+        comment = clean_comment(raw_text)
+
+        if state == "income":
+            balance = bank_get("my_balance", DEFAULT_MY_BALANCE) + amount
+            bank_set("my_balance", balance)
+        else:
+            balance = bank_get("my_balance", DEFAULT_MY_BALANCE) - amount
+            bank_set("my_balance", balance)
 
         save_transaction(state, amount, category, comment)
-        user_state[message.from_user.id] = None
+        credit_result = apply_credit_payment(category, amount) if state == "expense" else None
 
-        # Если приход записан как процент банка, добавляем сумму на банковский счёт.
-        bank_note = ""
-        if state == "income" and is_bank_percent_text(text):
-            account = add_bank_percent(amount)
-            bank_note = f"\n💳 На счёте банка: {fmt_sum(account)} сум"
-
+        user_state[chat_id] = None
         type_ru = "приход" if state == "income" else "расход"
 
-        await send(
-            message,
+        msg = (
             f"✅ Сохранено:\n"
             f"{type_ru} — {fmt_sum(amount)} сум\n"
             f"Категория: {category}\n"
-            f"Комментарий: {comment}"
-            f"{bank_note}"
+            f"Комментарий: {comment}\n"
+            f"💳 Мой баланс: {fmt_sum(balance)} сум"
         )
+
+        if credit_result:
+            msg += (
+                f"\n\n💳 {category}\n"
+                f"📉 Осталось погасить: {fmt_sum(credit_result['new_balance'])} сум"
+            )
+
+        await send(message, msg, reply_markup=kb)
         return
 
     await send(
@@ -647,7 +783,10 @@ async def process_text(message, raw_text):
         "Используй кнопки или напиши:\n"
         "расход 20 000 такси\n"
         "приход 1 500 000 зарплата\n"
-        "банк процент 52 005,73"
+        "банк процент 52 005,73\n"
+        "мой баланс 0\n\n"
+        "Или просто отправь SMS банка/карты текстом.",
+        reply_markup=kb
     )
 
 
@@ -663,20 +802,19 @@ async def delete_last(message):
     cursor.execute("DELETE FROM transactions WHERE id=?", (record_id,))
     conn.commit()
 
-    bank_note = ""
-    if t == "income" and category == "банк" and "процент" in normalize_text(comment):
+    # Откат обычного баланса
+    if category != "банк":
+        balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
+        if t == "income":
+            bank_set("my_balance", balance - amount)
+        elif t == "expense":
+            bank_set("my_balance", balance + amount)
+            rollback_credit_payment(category, amount)
+
+    # Откат банковского процента
+    if category == "банк" and t == "income" and "процент" in normalize_text(comment):
         account = bank_get("account", DEFAULT_BANK_ACCOUNT)
-        account = max(0, account - amount)
-        bank_set("account", account)
-        bank_note = f"\n💳 Счёт банка откатан: {fmt_sum(account)} сум"
-    elif t == "income" and normalize_text(category) == "пополнение карты":
-        balance = card_balance_get() - amount
-        card_balance_set(balance)
-        bank_note = f"\n💳 Остаток карты откатан: {fmt_sum(balance)} сум"
-    elif t == "expense" and normalize_text(category) == "карта":
-        balance = card_balance_get() + amount
-        card_balance_set(balance)
-        bank_note = f"\n💳 Остаток карты откатан: {fmt_sum(balance)} сум"
+        bank_set("account", max(0, account - amount))
 
     type_ru = "приход" if t == "income" else "расход"
 
@@ -684,12 +822,13 @@ async def delete_last(message):
         message,
         f"🗑 Удалено:\n"
         f"{type_ru} — {fmt_sum(amount)} сум\n"
-        f"{category} — {comment}"
-        f"{bank_note}"
+        f"{category} — {comment}\n\n"
+        f"💳 Мой баланс: {fmt_sum(bank_get('my_balance', DEFAULT_MY_BALANCE))} сум"
     )
 
 
 # ================== HANDLERS ==================
+
 
 @dp.message_handler(lambda m: m.from_user and m.from_user.id != ALLOWED_USER_ID, content_types=types.ContentTypes.ANY)
 async def deny_access(message: types.Message):
@@ -708,10 +847,10 @@ async def start(message: types.Message):
 @dp.message_handler(content_types=types.ContentType.VOICE)
 async def voice_handler(message: types.Message):
     if not is_allowed(message):
-        await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
+        await send(message, "⛔ Доступ запрещён")
         return
 
-    await send(message, "🎙 Голос пока отключён. Пиши текстом: расход 20 000 такси")
+    await send(message, "🎙 Голос пока отключён. Пиши текстом или отправь SMS текстом.")
 
 
 @dp.message_handler(content_types=types.ContentType.PHOTO)
@@ -720,18 +859,7 @@ async def photo_handler(message: types.Message):
         await send(message, "⛔ Доступ запрещён")
         return
 
-    caption = message.caption or ""
-    sms_data = parse_bank_sms(caption)
-    if sms_data:
-        await process_bank_sms(message, sms_data)
-        return
-
-    card_sms_data = parse_card_sms(caption)
-    if card_sms_data:
-        await process_card_sms(message, card_sms_data)
-        return
-
-    await send(message, "📷 Скрин получил, но текст SMS с картинки я сам прочитать не могу. Скопируй SMS текстом и отправь сюда.")
+    await send(message, "📷 Скрин пока не читаю. Скопируй SMS текстом и отправь сюда.")
 
 
 @dp.message_handler(content_types=types.ContentType.TEXT)
@@ -740,6 +868,7 @@ async def text_handler(message: types.Message):
 
 
 # ================== WEBHOOK ==================
+
 
 async def handle_index(request):
     return web.Response(text="Finance bot is running")
