@@ -502,6 +502,7 @@ async def bank_report(message):
         f"\nМожно написать:\n"
         f"• банк процент 52 005,73\n"
         f"• банк счет 364 630\n"
+        f"• банк на вклад 1 000 000\n"
         f"• мой баланс 0"
     )
 
@@ -518,6 +519,36 @@ async def process_bank_command(message, text):
 
     if amount is None:
         await bank_report(message)
+        return
+
+    if "на вклад" in text or "на депозит" in text:
+        if amount <= 0:
+            await send(message, "❌ Сумма должна быть больше 0")
+            return
+
+        if account < amount:
+            await send(
+                message,
+                f"❌ Недостаточно денег на счёте банка\n\n"
+                f"💳 На счёте банка: {fmt_sum(account)} сум\n"
+                f"Нужно перенести: {fmt_sum(amount)} сум"
+            )
+            return
+
+        account -= amount
+        deposit += amount
+
+        bank_set("account", account)
+        bank_set("deposit", deposit)
+
+        await send(
+            message,
+            f"✅ Переведено на вклад\n\n"
+            f"➡️ Сумма: {fmt_sum(amount)} сум\n\n"
+            f"💼 Вклад: {fmt_sum(deposit)} сум\n"
+            f"💳 На счёте банка: {fmt_sum(account)} сум\n"
+            f"💰 Всего в банке: {fmt_sum(deposit + account)} сум"
+        )
         return
 
     if "процент" in text:
