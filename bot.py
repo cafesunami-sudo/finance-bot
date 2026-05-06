@@ -307,16 +307,20 @@ def next_credit_reminder_text(credit_name):
     info = CREDITS.get(credit_name)
     if not info:
         return ""
-    today = now_uz().date()
-    year = today.year
-    month = today.month
+
     pay_day = int(info.get("pay_day", 1))
-    if today.day >= pay_day:
-        month += 1
-        if month > 12:
-            month = 1
-            year += 1
-    return f"Напомни оплатить {credit_name} до {pay_day:02d}.{month:02d}.{year}, сумма {fmt_sum(info.get('monthly', 0))} сум"
+    monthly = info.get("monthly", 0)
+    balance = bank_get(info["key"], info.get("balance", 0))
+
+    # Формат специально для бота-напоминателя:
+    # Кредит Миллий банк | остаток 52 001 041,12 | платеж 2 324 838,79 | дата 5
+    title = str(credit_name or "").strip()
+    if title.lower().startswith("кредит"):
+        title = "К" + title[1:]
+    else:
+        title = "Кредит " + title
+
+    return f"{title} | остаток {fmt_sum(balance)} | платеж {fmt_sum(monthly)} | дата {pay_day}"
 
 
 async def send(message: types.Message, text: str, reply_markup=None):
