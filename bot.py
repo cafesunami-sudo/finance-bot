@@ -1,6 +1,8 @@
 import os
 import re
 import sqlite3
+import psycopg2
+from urllib.parse import urlparse
 import logging
 from datetime import datetime, timedelta
 
@@ -79,10 +81,19 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
+
 # ================== БАЗА ==================
 
-conn = sqlite3.connect("finance.db", check_same_thread=False)
-cursor = conn.cursor()
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    cursor = conn.cursor()
+else:
+    conn = sqlite3.connect("finance.db", check_same_thread=False)
+    cursor = conn.cursor()
+
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
