@@ -272,7 +272,7 @@ def detect_category(text):
         return "одежда"
     if "узум" in text:
         return "кредит Узум банк"
-    if "миллий" in text:
+    if "миллий" in text or "nbu" in text:
         return "кредит Миллий банк"
     if "тбс" in text or "tbs" in text:
         return "кредит ТБС банк"
@@ -283,7 +283,7 @@ def detect_category(text):
 def clean_comment(text):
     text = normalize_text(text)
     text = re.sub(r"\d[\d\s.,]*", "", text)
-    text = text.replace("сум", "").replace("uzs", "")
+    text = text.replace("сум", "").replace("uzs", "").replace("so'm", "").replace("som", "")
     return " ".join(text.split()) or "без комментария"
 
 
@@ -301,6 +301,22 @@ def extract_sms_datetime(text):
             pass
 
     return now_uz().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def next_credit_reminder_text(credit_name):
+    info = CREDITS.get(credit_name)
+    if not info:
+        return ""
+    today = now_uz().date()
+    year = today.year
+    month = today.month
+    pay_day = int(info.get("pay_day", 1))
+    if today.day >= pay_day:
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return f"Напомни оплатить {credit_name} до {pay_day:02d}.{month:02d}.{year}, сумма {fmt_sum(info.get('monthly', 0))} сум"
 
 
 async def send(message: types.Message, text: str, reply_markup=None):
@@ -349,6 +365,32 @@ def apply_credit_payment(category, amount):
     }
 
 
+def apply_credit_payment_with_balance(category, paid_amount, new_credit_balance):
+    if category not in CREDITS:
+        return None
+
+    info = CREDITS[category]
+    old_balance = bank_get(info["key"], info["balance"])
+    principal_paid = old_balance - new_credit_balance
+    if principal_paid < 0:
+        principal_paid = 0
+    interest_paid = paid_amount - principal_paid
+    if interest_paid < 0:
+        interest_paid = 0
+
+    bank_set(info["key"], new_credit_balance)
+    return {
+        "name": category,
+        "paid": paid_amount,
+        "old_balance": old_balance,
+        "new_balance": new_credit_balance,
+        "principal_paid": principal_paid,
+        "interest_paid": interest_paid,
+        "monthly": info["monthly"],
+        "pay_day": info["pay_day"],
+    }
+
+
 def rollback_credit_payment(category, amount):
     if category not in CREDITS:
         return
@@ -384,6 +426,32 @@ def parse_bank_percent_sms(text):
         "percent": percent,
         "account": account,
         "date": date_value,
+    }
+
+
+def parse_nbu_credit_sms(text):
+    raw = str(text or "")
+    low = normalize_text(raw)
+
+    if "nbu" not in low and "milliy" not in low and "миллий" not in low:
+        return None
+    if "kredit" not in low or "qoldig" not in low:
+        return None
+
+    paid_match = re.search(r"bo['‘’`]?yicha\s*([\d\s.,]+)\s*so['‘’`]?m\s*yechildi", low, re.I)
+    if not paid_match:
+        paid_match = re.search(r"([\d\s.,]+)\s*so['‘’`]?m\s*yechildi", low, re.I)
+
+    balance_match = re.search(r"kredit\s+qoldig['‘’`]?i\s*([\d\s.,]+)\s*so['‘’`]?m", low, re.I)
+
+    if not paid_match or not balance_match:
+        return None
+
+    return {
+        "category": "кредит Миллий банк",
+        "amount": parse_money(paid_match.group(1)),
+        "credit_balance": parse_money(balance_match.group(1)),
+        "date": extract_sms_datetime(raw),
     }
 
 
@@ -432,6 +500,43 @@ async def handle_bank_percent_sms(message, parsed):
         f"📈 Процент: {fmt_sum(percent)} сум\n"
         f"💳 На счёте банка: {fmt_sum(account)} сум\n\n"
         f"ℹ️ В обычный отчет это не попадает, банк отдельно."
+    )
+
+
+async def handle_nbu_credit_sms(message, parsed):
+    amount = parsed["amount"]
+    category = parsed["category"]
+    new_credit_balance = parsed["credit_balance"]
+    date_value = parsed.get("date")
+
+    balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
+    new_my_balance = balance - amount
+    bank_set("my_balance", new_my_balance)
+
+    credit_result = apply_credit_payment_with_balance(category, amount, new_credit_balance)
+
+    save_transaction(
+        "expense",
+        amount,
+        category,
+        "SMS NBU: оплата кредита Миллий банк",
+        date_value
+    )
+
+    reminder_text = next_credit_reminder_text(category)
+
+    await send(
+        message,
+        f"✅ SMS NBU обработана\n\n"
+        f"💳 Оплачено с карты: {fmt_sum(amount)} сум\n"
+        f"🏦 Категория: {category}\n"
+        f"📉 Основной долг уменьшился на: {fmt_sum(credit_result['principal_paid'])} сум\n"
+        f"📈 Проценты/прочие начисления: {fmt_sum(credit_result['interest_paid'])} сум\n"
+        f"📌 Остаток кредита по SMS: {fmt_sum(credit_result['new_balance'])} сум\n"
+        f"💳 Мой баланс: {fmt_sum(new_my_balance)} сум\n\n"
+        f"📝 Текст для бота-напоминателя:\n"
+        f"{reminder_text}",
+        reply_markup=kb
     )
 
 
@@ -503,7 +608,8 @@ async def bank_report(message):
         f"• банк процент 52 005,73\n"
         f"• банк счет 364 630\n"
         f"• банк на вклад 1 000 000\n"
-        f"• мой баланс 0"
+        f"• мой баланс 0\n\n"
+        f"Или отправь SMS NBU по кредиту Миллий банк."
     )
 
     await send(message, text)
@@ -590,6 +696,32 @@ async def process_my_balance_command(message, text):
 
     bank_set("my_balance", amount)
     await send(message, f"💳 Мой баланс обновлён: {fmt_sum(amount)} сум")
+
+
+async def process_milliy_balance_command(message, text):
+    amount = extract_number(text)
+    if amount is None:
+        current = bank_get(CREDITS["кредит Миллий банк"]["key"], CREDITS["кредит Миллий банк"]["balance"])
+        await send(
+            message,
+            f"💳 Остаток кредита Миллий банк: {fmt_sum(current)} сум\n\n"
+            f"Чтобы исправить, напиши:\n"
+            f"миллий остаток 52 001 041,12"
+        )
+        return
+
+    info = CREDITS["кредит Миллий банк"]
+    old_balance = bank_get(info["key"], info["balance"])
+    bank_set(info["key"], amount)
+
+    await send(
+        message,
+        f"✅ Остаток Миллий банка исправлен\n\n"
+        f"Было: {fmt_sum(old_balance)} сум\n"
+        f"Стало: {fmt_sum(amount)} сум\n\n"
+        f"ℹ️ Расходы и мой баланс не изменены.",
+        reply_markup=kb
+    )
 
 
 # ================== ОТЧЁТЫ ==================
@@ -724,6 +856,12 @@ async def process_text(message, raw_text):
         await handle_bank_percent_sms(message, parsed_bank_sms)
         return
 
+    # SMS NBU по кредиту Миллий банк: берем сумму списания и точный остаток из SMS.
+    parsed_nbu_credit_sms = parse_nbu_credit_sms(raw_text)
+    if parsed_nbu_credit_sms:
+        await handle_nbu_credit_sms(message, parsed_nbu_credit_sms)
+        return
+
     # SMS карты: пополнение или оплата
     parsed_card_sms = parse_card_sms(raw_text)
     if parsed_card_sms:
@@ -744,6 +882,10 @@ async def process_text(message, raw_text):
 
     if "месяц" in text:
         await report(message, "month")
+        return
+
+    if "миллий" in text and "остаток" in text:
+        await process_milliy_balance_command(message, raw_text)
         return
 
     if "остаток" in text:
