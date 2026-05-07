@@ -1,5 +1,6 @@
 import os
 import re
+import psycopg2
 import logging
 from datetime import datetime, timedelta
 
