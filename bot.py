@@ -1,8 +1,5 @@
 import os
 import re
-import sqlite3
-import psycopg2
-from urllib.parse import urlparse
 import logging
 from datetime import datetime, timedelta
 
@@ -81,25 +78,21 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-
 # ================== БАЗА ==================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL не найден. Добавь DATABASE_URL в Render Environment.")
 
-if DATABASE_URL:
-    conn = psycopg2.connect(DATABASE_URL)
-    conn.autocommit = True
-    cursor = conn.cursor()
-else:
-    conn = sqlite3.connect("finance.db", check_same_thread=False)
-    cursor = conn.cursor()
-
+conn = psycopg2.connect(DATABASE_URL)
+conn.autocommit = True
+cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id SERIAL PRIMARY KEY,
     type TEXT,
-    amount REAL,
+    amount DOUBLE PRECISION,
     category TEXT,
     comment TEXT,
     date TEXT
@@ -109,11 +102,10 @@ CREATE TABLE IF NOT EXISTS transactions (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS bank (
     name TEXT PRIMARY KEY,
-    value REAL
+    value DOUBLE PRECISION
 )
 """)
 
-conn.commit()
 
 # ================== ВОССТАНОВЛЕНИЕ ДАННЫХ ==================
 
@@ -132,14 +124,14 @@ for item in RESTORED_DATA:
     cursor.execute(
         """
         SELECT id FROM transactions
-        WHERE type=? AND amount=? AND category=? AND comment=? AND date=?
+        WHERE type=%s AND amount=%s AND category=%s AND comment=%s AND date=%s
         """,
         item
     )
     exists = cursor.fetchone()
     if not exists:
         cursor.execute(
-            "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO transactions (type, amount, category, comment, date) VALUES (%s, %s, %s, %s, %s)",
             item
         )
 
@@ -147,18 +139,19 @@ conn.commit()
 
 
 def bank_get(name, default=0):
-    cursor.execute("SELECT value FROM bank WHERE name=?", (name,))
+    cursor.execute("SELECT value FROM bank WHERE name=%s", (name,))
     row = cursor.fetchone()
     if row is None:
-        cursor.execute("INSERT INTO bank (name, value) VALUES (?, ?)", (name, default))
-        conn.commit()
+        cursor.execute("INSERT INTO bank (name, value) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING", (name, default))
         return default
     return row[0]
 
 
 def bank_set(name, value):
-    cursor.execute("INSERT OR REPLACE INTO bank (name, value) VALUES (?, ?)", (name, float(value)))
-    conn.commit()
+    cursor.execute(
+        "INSERT INTO bank (name, value) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+        (name, float(value))
+    )
 
 
 bank_get("deposit", DEFAULT_BANK_DEPOSIT)
@@ -347,18 +340,18 @@ def save_transaction(t_type, amount, category, comment, date_value=None):
         date_value = now_uz().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute(
-        "INSERT INTO transactions (type, amount, category, comment, date) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO transactions (type, amount, category, comment, date) VALUES (%s, %s, %s, %s, %s) RETURNING id",
         (t_type, amount, category, comment, date_value)
     )
-    conn.commit()
-    return cursor.lastrowid
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def update_transaction(record_id, category=None, comment=None):
     if category is not None:
-        cursor.execute("UPDATE transactions SET category=? WHERE id=?", (category, record_id))
+        cursor.execute("UPDATE transactions SET category=%s WHERE id=%s", (category, record_id))
     if comment is not None:
-        cursor.execute("UPDATE transactions SET comment=? WHERE id=?", (comment, record_id))
+        cursor.execute("UPDATE transactions SET comment=%s WHERE id=%s", (comment, record_id))
     conn.commit()
 
 
@@ -987,7 +980,7 @@ async def delete_last(message):
         return
 
     record_id, t, amount, category, comment = row
-    cursor.execute("DELETE FROM transactions WHERE id=?", (record_id,))
+    cursor.execute("DELETE FROM transactions WHERE id=%s", (record_id,))
     conn.commit()
 
     # Откат обычного баланса
