@@ -18,6 +18,8 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 
+# ================== НАСТРОЙКИ ==================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -28,18 +30,6 @@ if not DATABASE_URL:
 
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "137602775"))
 
-RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
-
-if PUBLIC_URL:
-    BASE_URL = PUBLIC_URL.rstrip("/")
-elif RAILWAY_PUBLIC_DOMAIN:
-    BASE_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}"
-else:
-    BASE_URL = ""
-
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}" if BASE_URL else ""
 PORT = int(os.getenv("PORT", "8080"))
 
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
@@ -114,6 +104,8 @@ conn = psycopg2.connect(DATABASE_URL)
 conn.autocommit = True
 cursor = conn.cursor()
 
+
+# ================== БАЗА ==================
 
 def now_uz():
     return datetime.utcnow() + timedelta(hours=5)
@@ -271,6 +263,8 @@ def mark_humo_message_processed(message_id, raw_text):
     )
 
 
+# ================== КНОПКИ ==================
+
 def main_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("➕ Приход"), KeyboardButton("➖ Расход"))
@@ -331,6 +325,8 @@ def category_inline_kb(record_id):
     )
     return kb_inline
 
+
+# ================== ПОМОЩНИКИ ==================
 
 def fmt_sum(value):
     value = float(value or 0)
@@ -646,6 +642,8 @@ async def process_humo_text(raw_text, message_id=None):
     await send_message_to_user(text, reply_markup=category_inline_kb(record_id))
 
 
+# ================== ОТЧЁТЫ И БАНК ==================
+
 async def bank_report(message):
     deposit = bank_get("deposit", DEFAULT_BANK_DEPOSIT)
     account = bank_get("account", DEFAULT_BANK_ACCOUNT)
@@ -912,6 +910,8 @@ async def add_category_command(message, raw_text):
     )
 
 
+# ================== ОБРАБОТКА ТЕКСТА ==================
+
 async def process_text(message, raw_text):
     if not is_allowed(message):
         await send(message, "⛔ Доступ запрещён")
@@ -930,7 +930,7 @@ async def process_text(message, raw_text):
         await add_category_command(message, raw_text)
         return
 
-    if user_state.get(chat_id, "").startswith("edit_comment:"):
+    if (user_state.get(chat_id) or "").startswith("edit_comment:"):
         record_id = int(user_state[chat_id].split(":")[1])
         new_comment = raw_text.strip() or "без комментария"
         update_transaction(record_id, comment=new_comment)
@@ -938,7 +938,7 @@ async def process_text(message, raw_text):
         await send(message, f"✅ Комментарий сохранён:\n{new_comment}", reply_markup=kb)
         return
 
-    if user_state.get(chat_id, "").startswith("add_category_for_record:"):
+    if (user_state.get(chat_id) or "").startswith("add_category_for_record:"):
         record_id = int(user_state[chat_id].split(":")[1])
         new_category = raw_text.strip()
 
@@ -1065,6 +1065,8 @@ async def process_text(message, raw_text):
     )
 
 
+# ================== HANDLERS ==================
+
 @dp.message_handler(lambda m: m.from_user and m.from_user.id != ALLOWED_USER_ID, content_types=types.ContentTypes.ANY)
 async def deny_access(message: types.Message):
     await send(message, "⛔ Доступ запрещён")
@@ -1166,6 +1168,8 @@ async def add_category_callback(callback_query: types.CallbackQuery):
     await callback_query.message.answer("➕ Напиши название новой категории:")
 
 
+# ================== TELETHON HUMO LISTENER ==================
+
 telethon_client = None
 
 
@@ -1196,60 +1200,42 @@ async def start_humo_listener():
     logging.info("HUMO listener запущен")
 
 
+# ================== RAILWAY KEEP-ALIVE SERVER + POLLING ==================
+
 async def handle_index(request):
-    return web.Response(text="Finance bot is running")
+    return web.Response(text="Finance bot is running with polling")
 
 
 async def handle_health(request):
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL)
     return web.Response(text="OK")
 
 
-async def handle_webhook(request):
-    data = await request.json()
-    update = types.Update.to_object(data)
-    await dp.process_update(update)
-    return web.Response(text="ok")
-
-
-async def on_startup(app):
-    init_db()
-    await start_humo_listener()
-
-    if WEBHOOK_URL:
-        await bot.delete_webhook(drop_pending_updates=False)
-        await bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"Webhook set: {WEBHOOK_URL}")
-
-
-async def on_shutdown(app):
-    if telethon_client:
-        await telethon_client.disconnect()
-
-    await bot.delete_webhook()
-    await bot.close()
-
-
-def run_webhook():
+async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/health", handle_health)
-    app.router.add_post(WEBHOOK_PATH, handle_webhook)
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    web.run_app(app, host="0.0.0.0", port=PORT)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logging.info(f"Web server started on port {PORT}")
 
 
-async def run_polling():
+async def main():
     init_db()
-    await start_humo_listener()
+
+    # Главное изменение: webhook полностью отключаем, работаем через polling.
     await bot.delete_webhook(drop_pending_updates=False)
+
+    await start_web_server()
+    await start_humo_listener()
+
+    logging.info("Finance bot polling started")
     await dp.start_polling()
 
 
 if __name__ == "__main__":
-    if WEBHOOK_URL:
-        run_webhook()
-    else:
-        asyncio.run(run_polling())
+    asyncio.run(main())
