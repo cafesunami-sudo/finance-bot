@@ -105,6 +105,33 @@ conn.autocommit = True
 cursor = conn.cursor()
 
 
+def get_cursor():
+    """Возвращает рабочий cursor PostgreSQL.
+    Если Railway/PostgreSQL закрыл старый cursor или соединение, создаем новый.
+    """
+    global conn, cursor
+
+    try:
+        if conn.closed:
+            conn = psycopg2.connect(DATABASE_URL)
+            conn.autocommit = True
+            cursor = conn.cursor()
+            return cursor
+    except Exception:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True
+        cursor = conn.cursor()
+        return cursor
+
+    try:
+        if cursor.closed:
+            cursor = conn.cursor()
+    except Exception:
+        cursor = conn.cursor()
+
+    return cursor
+
+
 # ================== БАЗА ==================
 
 def now_uz():
@@ -112,7 +139,7 @@ def now_uz():
 
 
 def init_db():
-    cursor.execute("""
+    get_cursor().execute("""
     CREATE TABLE IF NOT EXISTS transactions (
         id SERIAL PRIMARY KEY,
         type TEXT,
@@ -123,14 +150,14 @@ def init_db():
     )
     """)
 
-    cursor.execute("""
+    get_cursor().execute("""
     CREATE TABLE IF NOT EXISTS bank (
         name TEXT PRIMARY KEY,
         value DOUBLE PRECISION
     )
     """)
 
-    cursor.execute("""
+    get_cursor().execute("""
     CREATE TABLE IF NOT EXISTS humo_messages (
         id SERIAL PRIMARY KEY,
         telegram_message_id TEXT UNIQUE,
@@ -139,7 +166,7 @@ def init_db():
     )
     """)
 
-    cursor.execute("""
+    get_cursor().execute("""
     CREATE TABLE IF NOT EXISTS categories (
         id SERIAL PRIMARY KEY,
         name TEXT UNIQUE,
@@ -160,11 +187,11 @@ def init_db():
 
 
 def bank_get(name, default=0):
-    cursor.execute("SELECT value FROM bank WHERE name=%s", (name,))
-    row = cursor.fetchone()
+    get_cursor().execute("SELECT value FROM bank WHERE name=%s", (name,))
+    row = get_cursor().fetchone()
 
     if row is None:
-        cursor.execute(
+        get_cursor().execute(
             "INSERT INTO bank (name, value) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING",
             (name, default)
         )
@@ -174,7 +201,7 @@ def bank_get(name, default=0):
 
 
 def bank_set(name, value):
-    cursor.execute(
+    get_cursor().execute(
         """
         INSERT INTO bank (name, value)
         VALUES (%s, %s)
@@ -189,7 +216,7 @@ def add_category_to_db(name):
     if not name:
         return False
 
-    cursor.execute(
+    get_cursor().execute(
         """
         INSERT INTO categories (name, created_at)
         VALUES (%s, %s)
@@ -201,8 +228,8 @@ def add_category_to_db(name):
 
 
 def get_categories():
-    cursor.execute("SELECT name FROM categories ORDER BY id ASC")
-    rows = cursor.fetchall()
+    get_cursor().execute("SELECT name FROM categories ORDER BY id ASC")
+    rows = get_cursor().fetchall()
     categories = [row[0] for row in rows]
 
     if not categories:
@@ -217,7 +244,7 @@ def save_transaction(t_type, amount, category, comment, date_value=None):
     if date_value is None:
         date_value = now_uz().strftime("%Y-%m-%d %H:%M:%S")
 
-    cursor.execute(
+    get_cursor().execute(
         """
         INSERT INTO transactions (type, amount, category, comment, date)
         VALUES (%s, %s, %s, %s, %s)
@@ -226,34 +253,34 @@ def save_transaction(t_type, amount, category, comment, date_value=None):
         (t_type, amount, category, comment, date_value)
     )
 
-    row = cursor.fetchone()
+    row = get_cursor().fetchone()
     return row[0] if row else None
 
 
 def update_transaction(record_id, category=None, comment=None):
     if category is not None:
-        cursor.execute(
+        get_cursor().execute(
             "UPDATE transactions SET category=%s WHERE id=%s",
             (category, record_id)
         )
 
     if comment is not None:
-        cursor.execute(
+        get_cursor().execute(
             "UPDATE transactions SET comment=%s WHERE id=%s",
             (comment, record_id)
         )
 
 
 def already_processed_humo_message(message_id):
-    cursor.execute(
+    get_cursor().execute(
         "SELECT id FROM humo_messages WHERE telegram_message_id=%s",
         (str(message_id),)
     )
-    return cursor.fetchone() is not None
+    return get_cursor().fetchone() is not None
 
 
 def mark_humo_message_processed(message_id, raw_text):
-    cursor.execute(
+    get_cursor().execute(
         """
         INSERT INTO humo_messages (telegram_message_id, raw_text, created_at)
         VALUES (%s, %s, %s)
@@ -776,12 +803,12 @@ async def report(message, mode):
         title = "💰 Всё время"
         start = datetime(2000, 1, 1)
 
-    cursor.execute("""
+    get_cursor().execute("""
     SELECT type, amount, category, comment, date
     FROM transactions
     ORDER BY date ASC
     """)
-    rows = cursor.fetchall()
+    rows = get_cursor().fetchall()
 
     income = 0
     expense = 0
@@ -837,20 +864,20 @@ async def report(message, mode):
 
 
 async def delete_last(message):
-    cursor.execute("""
+    get_cursor().execute("""
     SELECT id, type, amount, category, comment
     FROM transactions
     ORDER BY id DESC
     LIMIT 1
     """)
-    row = cursor.fetchone()
+    row = get_cursor().fetchone()
 
     if not row:
         await send(message, "Удалять нечего")
         return
 
     record_id, t, amount, category, comment = row
-    cursor.execute("DELETE FROM transactions WHERE id=%s", (record_id,))
+    get_cursor().execute("DELETE FROM transactions WHERE id=%s", (record_id,))
 
     if category != "банк":
         balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
@@ -949,8 +976,8 @@ async def process_text(message, raw_text):
         add_category_to_db(new_category)
         update_transaction(record_id, category=new_category)
 
-        cursor.execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
-        row = cursor.fetchone()
+        get_cursor().execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
+        row = get_cursor().fetchone()
         if row:
             apply_credit_payment(new_category, row[0])
 
@@ -1121,8 +1148,8 @@ async def category_callback(callback_query: types.CallbackQuery):
     record_id = int(parts[1])
     category = parts[2]
 
-    cursor.execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
-    row = cursor.fetchone()
+    get_cursor().execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
+    row = get_cursor().fetchone()
 
     if not row:
         await callback_query.answer("Запись не найдена", show_alert=True)
