@@ -37,6 +37,10 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELETHON_SESSION_STRING = os.getenv("TELETHON_SESSION_STRING")
 ENABLE_HUMO_LISTENER = bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
 
+# Бот будет учитывать HUMO-уведомления только по этой карте.
+# Например: HUMOCARD *0918
+ALLOWED_HUMO_CARD_LAST4 = "0918"
+
 DEFAULT_BANK_DEPOSIT = 88288796
 DEFAULT_BANK_ACCOUNT = 0
 DEFAULT_BANK_PERCENT = 0
@@ -523,9 +527,25 @@ def extract_humo_comment(text):
     return "HUMO"
 
 
+def is_allowed_humo_card(text):
+    """Проверяет, что HUMO-уведомление относится именно к нужной карте."""
+    raw = str(text or "")
+
+    patterns = [
+        rf"HUMOCARD\s*\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
+        rf"HUMO\s*CARD\s*\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
+        rf"\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
+    ]
+
+    return any(re.search(pattern, raw, re.I) for pattern in patterns)
+
+
 def parse_humo_message(text):
     raw = str(text or "")
     low = normalize_text(raw)
+
+    if not is_allowed_humo_card(raw):
+        return None
 
     if "uzs" not in low:
         return None
