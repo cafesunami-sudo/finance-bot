@@ -232,7 +232,7 @@ def add_category_to_db(name):
 
 
 def get_categories():
-    get_cursor().execute("SELECT name FROM categories ORDER BY id ASC")
+    get_cursor().execute("SELECT name FROM categories ORDER BY LOWER(name) ASC")
     rows = get_cursor().fetchall()
     categories = [row[0] for row in rows]
 
@@ -629,6 +629,44 @@ def rollback_credit_payment(category, amount):
     bank_set(info["key"], balance + amount)
 
 
+def finalize_expense_category(record_id, category, create_if_missing=False):
+    """Сохраняет категорию для расхода.
+    Если категории нет в списке и create_if_missing=True — добавляет её в базу.
+    """
+    category = str(category or "").strip()
+    if not category:
+        return None
+
+    existing_categories = get_categories()
+    if create_if_missing and category not in existing_categories:
+        add_category_to_db(category)
+
+    get_cursor().execute(
+        "SELECT amount, category FROM transactions WHERE id=%s",
+        (record_id,)
+    )
+    row = get_cursor().fetchone()
+
+    if not row:
+        return None
+
+    amount, old_category = row
+
+    # Если категорию по этой записи меняют повторно и старая была кредитом — откатываем кредит.
+    if old_category and old_category != "ожидает категорию" and old_category != category:
+        rollback_credit_payment(old_category, amount)
+
+    update_transaction(record_id, category=category)
+    credit_result = apply_credit_payment(category, amount)
+
+    return {
+        "record_id": record_id,
+        "category": category,
+        "amount": amount,
+        "credit_result": credit_result,
+    }
+
+
 async def process_humo_text(raw_text, message_id=None):
     parsed = parse_humo_message(raw_text)
 
@@ -684,7 +722,13 @@ async def process_humo_text(raw_text, message_id=None):
     if guessed_category != "прочее":
         text += f"Похоже на: {guessed_category}\n"
 
-    text += "Выбери категорию:"
+    text += (
+        "Выбери категорию кнопкой.\n"
+        "Если нужной категории нет — просто напиши её названием ответным сообщением."
+    )
+
+    user_state[ALLOWED_USER_ID] = f"choose_category:{record_id}"
+    pending_expense[ALLOWED_USER_ID] = record_id
 
     await send_message_to_user(text, reply_markup=category_inline_kb(record_id))
 
@@ -985,6 +1029,49 @@ async def process_text(message, raw_text):
         await send(message, f"✅ Комментарий сохранён:\n{new_comment}", reply_markup=kb)
         return
 
+    if (user_state.get(chat_id) or "").startswith("choose_category:"):
+        record_id = int(user_state[chat_id].split(":")[1])
+        category_text = raw_text.strip()
+
+        system_commands = [
+            "📂 категории", "➕ добавить категорию", "📊 сегодня", "📅 неделя",
+            "🗓 месяц", "💰 остаток", "🏦 банк", "🗑 удалить", "➕ приход", "➖ расход"
+        ]
+
+        if text in system_commands or text == "🏠 меню":
+            user_state[chat_id] = None
+            pending_expense.pop(chat_id, None)
+        else:
+            if not category_text:
+                await send(message, "Напиши название категории.")
+                return
+
+            result = finalize_expense_category(
+                record_id,
+                category_text,
+                create_if_missing=True
+            )
+
+            user_state[chat_id] = None
+            pending_expense.pop(chat_id, None)
+
+            if not result:
+                await send(message, "❌ Запись не найдена. Попробуй выбрать категорию заново.", reply_markup=kb)
+                return
+
+            credit_result = result["credit_result"]
+            msg = (
+                f"✅ Категория сохранена: {category_text}\n"
+                f"Сумма: {fmt_sum(result['amount'])} сум\n\n"
+                f"Теперь эта категория будет видна в списке."
+            )
+
+            if credit_result:
+                msg += f"\n\n💳 {category_text}\n📉 Осталось погасить: {fmt_sum(credit_result['new_balance'])} сум"
+
+            await send(message, msg, reply_markup=kb)
+            return
+
     if (user_state.get(chat_id) or "").startswith("add_category_for_record:"):
         record_id = int(user_state[chat_id].split(":")[1])
         new_category = raw_text.strip()
@@ -993,16 +1080,30 @@ async def process_text(message, raw_text):
             await send(message, "Напиши название категории.")
             return
 
-        add_category_to_db(new_category)
-        update_transaction(record_id, category=new_category)
-
-        get_cursor().execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
-        row = get_cursor().fetchone()
-        if row:
-            apply_credit_payment(new_category, row[0])
+        result = finalize_expense_category(
+            record_id,
+            new_category,
+            create_if_missing=True
+        )
 
         user_state[chat_id] = None
-        await send(message, f"✅ Новая категория добавлена и сохранена: {new_category}", reply_markup=kb)
+        pending_expense.pop(chat_id, None)
+
+        if not result:
+            await send(message, "❌ Запись не найдена. Попробуй выбрать категорию заново.", reply_markup=kb)
+            return
+
+        credit_result = result["credit_result"]
+        msg = (
+            f"✅ Новая категория добавлена и сохранена: {new_category}\n"
+            f"Сумма: {fmt_sum(result['amount'])} сум\n\n"
+            f"Теперь она будет видна в кнопках."
+        )
+
+        if credit_result:
+            msg += f"\n\n💳 {new_category}\n📉 Осталось погасить: {fmt_sum(credit_result['new_balance'])} сум"
+
+        await send(message, msg, reply_markup=kb)
         return
 
     if text.startswith("добавить категорию") or text.startswith("категория") or "добавить категорию" in text:
@@ -1080,7 +1181,23 @@ async def process_text(message, raw_text):
             balance = bank_get("my_balance", DEFAULT_MY_BALANCE) - amount
             bank_set("my_balance", balance)
 
-        save_transaction(state, amount, category, comment)
+        if state == "expense" and category == "прочее":
+            record_id = save_transaction(state, amount, "ожидает категорию", comment)
+            user_state[chat_id] = f"choose_category:{record_id}"
+            pending_expense[chat_id] = record_id
+
+            await send(
+                message,
+                f"✅ Расход сохранён, но категорию не понял.\n"
+                f"Сумма: {fmt_sum(amount)} сум\n"
+                f"Комментарий: {comment}\n"
+                f"💳 Мой баланс: {fmt_sum(balance)} сум\n\n"
+                f"Выбери категорию кнопкой или просто напиши новую категорию текстом.",
+                reply_markup=category_inline_kb(record_id)
+            )
+            return
+
+        record_id = save_transaction(state, amount, category, comment)
         credit_result = apply_credit_payment(category, amount) if state == "expense" else None
 
         user_state[chat_id] = None
@@ -1129,6 +1246,7 @@ async def start(message: types.Message):
         message,
         "💰 Финансовый бот готов\n\n"
         "HUMO расходы будут приходить сюда автоматически.\n\n"
+        "Если нужной категории нет, после расхода просто напиши новую категорию текстом.\n\n"
         "Можно добавить категорию:\n"
         "добавить категорию кафе",
         reply_markup=kb
@@ -1168,16 +1286,21 @@ async def category_callback(callback_query: types.CallbackQuery):
     record_id = int(parts[1])
     category = parts[2]
 
-    get_cursor().execute("SELECT amount FROM transactions WHERE id=%s", (record_id,))
-    row = get_cursor().fetchone()
+    result = finalize_expense_category(
+        record_id,
+        category,
+        create_if_missing=False
+    )
 
-    if not row:
+    user_state[callback_query.from_user.id] = None
+    pending_expense.pop(callback_query.from_user.id, None)
+
+    if not result:
         await callback_query.answer("Запись не найдена", show_alert=True)
         return
 
-    amount = row[0]
-    update_transaction(record_id, category=category)
-    credit_result = apply_credit_payment(category, amount)
+    amount = result["amount"]
+    credit_result = result["credit_result"]
 
     if credit_result:
         text = (
