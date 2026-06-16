@@ -37,9 +37,16 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELETHON_SESSION_STRING = os.getenv("TELETHON_SESSION_STRING")
 ENABLE_HUMO_LISTENER = bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
 
-# Бот будет учитывать HUMO-уведомления только по этой карте.
-# Например: HUMOCARD *0918
-ALLOWED_HUMO_CARD_LAST4 = "0918"
+# Бот будет учитывать HUMO-уведомления только по этим картам.
+# Ключ — последние 4 цифры карты, значение — понятное название карты.
+ALLOWED_HUMO_CARDS = {
+    "0918": "HUMO 0918",
+    "2067": "Окто банк",
+    "3582": "ТБС Осмон карта",
+    "3039": "Капитал банк",
+    "3532": "Инфин банк",
+    "1293": "Инфин блэк",
+}
 
 DEFAULT_BANK_DEPOSIT = 88288796
 DEFAULT_BANK_ACCOUNT = 0
@@ -82,7 +89,10 @@ DEFAULT_EXPENSE_CATEGORIES = [
     "кафе",
     "ресторан",
     "еда",
-    "коммунальные",
+    "вода",
+    "газ",
+    "мусор",
+    "свет",
     "Жалал",
     "билет",
     "Фуркат",
@@ -180,6 +190,9 @@ def init_db():
 
     for cat in DEFAULT_EXPENSE_CATEGORIES:
         add_category_to_db(cat)
+
+    # Старую общую категорию убираем из кнопок, новые платежи идут отдельно: вода/свет/газ/мусор.
+    get_cursor().execute("DELETE FROM categories WHERE name=%s", ("коммунальные",))
 
     bank_get("deposit", DEFAULT_BANK_DEPOSIT)
     bank_get("account", DEFAULT_BANK_ACCOUNT)
@@ -430,8 +443,18 @@ def detect_category(text):
         return "школа"
     if "аптек" in text or "dorixona" in text or "pharm" in text or "лекар" in text:
         return "аптека"
-    if any(x in text for x in ["свет", "мусор", "коммун", "газ", "вода", "uzgas", "hududiy"]):
-        return "коммунальные"
+    # Коммунальные платежи разделены отдельно.
+    # Можно писать: "коммунал свет", "за свет", "электричество", "газ", "вода", "мусор".
+    if any(x in text for x in ["свет", "электр", "elektr", "energy", "hududiy"]):
+        return "свет"
+    if any(x in text for x in ["газ", "uzgas", "газоснаб", "gas"]):
+        return "газ"
+    if any(x in text for x in ["вода", "сув", "водоканал", "water"]):
+        return "вода"
+    if any(x in text for x in ["мусор", "чиқинди", "chiqindi", "toza", "тбо"]):
+        return "мусор"
+    if "коммун" in text:
+        return "прочее"
     if "жалал" in text:
         return "Жалал"
     if "билет" in text:
@@ -527,24 +550,35 @@ def extract_humo_comment(text):
     return "HUMO"
 
 
-def is_allowed_humo_card(text):
-    """Проверяет, что HUMO-уведомление относится именно к нужной карте."""
+def extract_humo_card_info(text):
+    """Возвращает последние 4 цифры и название карты из HUMO-уведомления."""
     raw = str(text or "")
 
-    patterns = [
-        rf"HUMOCARD\s*\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
-        rf"HUMO\s*CARD\s*\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
-        rf"\*\s*{ALLOWED_HUMO_CARD_LAST4}\b",
-    ]
+    # Поддерживает форматы: HUMOCARD *0918, HUMO-CARD *2067, HUMO CARD *2067, **** **** **** 2067.
+    for last4, card_name in ALLOWED_HUMO_CARDS.items():
+        patterns = [
+            rf"HUMOCARD\s*[- ]?\s*\*\s*{last4}\b",
+            rf"HUMO\s*[- ]?\s*CARD\s*\*\s*{last4}\b",
+            rf"\*\s*{last4}\b",
+            rf"\b{last4}\b",
+        ]
+        if any(re.search(pattern, raw, re.I) for pattern in patterns):
+            return {"last4": last4, "name": card_name}
 
-    return any(re.search(pattern, raw, re.I) for pattern in patterns)
+    return None
+
+
+def is_allowed_humo_card(text):
+    """Проверяет, что HUMO-уведомление относится к одной из моих карт."""
+    return extract_humo_card_info(text) is not None
 
 
 def parse_humo_message(text):
     raw = str(text or "")
     low = normalize_text(raw)
 
-    if not is_allowed_humo_card(raw):
+    card_info = extract_humo_card_info(raw)
+    if not card_info:
         return None
 
     if "uzs" not in low:
@@ -552,7 +586,7 @@ def parse_humo_message(text):
 
     is_income = any(x in low for x in [
         "kirim", "to'ldirish", "toldirish", "пополнение",
-        "поступление", "vozvrat", "refund", "зачисление",
+        "поступление", "vozvrat", "refund", "зачисление", "счет по карте изменен", "счёт по карте изменен",
     ])
 
     is_expense = any(x in low for x in [
@@ -585,6 +619,8 @@ def parse_humo_message(text):
         "date": date_value,
         "comment": comment,
         "raw": raw,
+        "card_last4": card_info["last4"],
+        "card_name": card_info["name"],
     }
 
 
@@ -681,6 +717,9 @@ async def process_humo_text(raw_text, message_id=None):
     amount = parsed["amount"]
     date_value = parsed["date"]
     comment = parsed["comment"]
+    card_last4 = parsed.get("card_last4", "----")
+    card_name = parsed.get("card_name", "Карта")
+    card_text = f"{card_name} *{card_last4}"
 
     current_balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
 
@@ -688,11 +727,12 @@ async def process_humo_text(raw_text, message_id=None):
         new_balance = current_balance + amount
         bank_set("my_balance", new_balance)
 
-        save_transaction("income", amount, "пополнение", comment, date_value)
+        save_transaction("income", amount, "пополнение", f"{comment} | {card_text}", date_value)
 
         await send_message_to_user(
             f"➕ Приход HUMO\n\n"
             f"Сумма: {fmt_sum(amount)} сум\n"
+            f"Карта: {card_text}\n"
             f"Откуда: {comment}\n"
             f"💳 Баланс: {fmt_sum(new_balance)} сум",
             reply_markup=kb
@@ -708,13 +748,14 @@ async def process_humo_text(raw_text, message_id=None):
         "expense",
         amount,
         "ожидает категорию",
-        comment,
+        f"{comment} | {card_text}",
         date_value
     )
 
     text = (
         f"➖ Расход HUMO\n\n"
         f"Сумма: {fmt_sum(amount)} сум\n"
+        f"Карта: {card_text}\n"
         f"Комментарий: {comment}\n"
         f"💳 Баланс: {fmt_sum(new_balance)} сум\n\n"
     )
