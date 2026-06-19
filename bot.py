@@ -584,6 +584,8 @@ def parse_humo_message(text):
     if "uzs" not in low:
         return None
 
+    # Ничего не считаем по разнице баланса карты.
+    # Бот просто берет сумму из HUMO-сообщения и показывает, на какую карту она пришла.
     is_income = any(x in low for x in [
         "kirim", "to'ldirish", "toldirish", "пополнение",
         "поступление", "vozvrat", "refund", "зачисление", "счет по карте изменен", "счёт по карте изменен",
@@ -1401,10 +1403,10 @@ async def start_humo_listener():
 
     telethon_client = TelegramClient(session, api_id, api_hash)
 
-    @telethon_client.on(events.NewMessage(from_users="HUMOcardbot"))
+    @telethon_client.on(events.NewMessage())
     async def humo_handler(event):
         text = event.raw_text
-        logging.info("Новое сообщение HUMO получено")
+        logging.info("Новое сообщение Telegram получено, проверяю HUMO")
         await process_humo_text(text, message_id=event.message.id)
 
     await telethon_client.start()
