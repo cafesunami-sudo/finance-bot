@@ -40,12 +40,12 @@ ENABLE_HUMO_LISTENER = bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
 # Бот будет учитывать HUMO-уведомления только по этим картам.
 # Ключ — последние 4 цифры карты, значение — понятное название карты.
 ALLOWED_HUMO_CARDS = {
-    "0918": "HUMO 0918",
+    "0918": "ТБС Банк",
     "2067": "Окто банк",
-    "3582": "ТБС Осмон карта",
+    "3582": "ТБС Осмон",
     "3039": "Капитал банк",
-    "3532": "Инфин банк",
-    "1293": "Инфин блэк",
+    "3532": "Инфин Банк",
+    "1293": "Инфин Black",
 }
 
 DEFAULT_BANK_DEPOSIT = 88288796
@@ -724,6 +724,17 @@ async def process_humo_text(raw_text, message_id=None):
     card_text = f"{card_name} *{card_last4}"
 
     current_balance = bank_get("my_balance", DEFAULT_MY_BALANCE)
+
+    # Дополнительные карты: только уведомление, без учета в балансе и отчетах
+    if card_last4 != "0918":
+        await send_message_to_user(
+            f"💰 Поступление средств\n\n"
+            f"Сумма: {fmt_sum(amount)} сум\n"
+            f"Карта: {card_text}\n"
+            f"Источник: {comment}",
+            reply_markup=kb
+        )
+        return
 
     if parsed["type"] == "income":
         new_balance = current_balance + amount
