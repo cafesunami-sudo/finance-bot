@@ -1403,10 +1403,20 @@ async def start_humo_listener():
 
     telethon_client = TelegramClient(session, api_id, api_hash)
 
-    @telethon_client.on(events.NewMessage())
+    # ВАЖНО:
+    # Слушаем только официального HUMO Card бота.
+    # Раньше стоял events.NewMessage(), из-за этого Telethon ловил все Telegram-сообщения.
+    @telethon_client.on(events.NewMessage(from_users="HUMOcardbot"))
     async def humo_handler(event):
-        text = event.raw_text
-        logging.info("Новое сообщение Telegram получено, проверяю HUMO")
+        text = event.raw_text or ""
+
+        # Дополнительная защита: если вдруг от источника пришло не HUMO-уведомление,
+        # молча игнорируем и не грузим базу.
+        low = normalize_text(text)
+        if "humo" not in low or "uzs" not in low:
+            return
+
+        logging.info("Получено HUMO-сообщение, обрабатываю")
         await process_humo_text(text, message_id=event.message.id)
 
     await telethon_client.start()
