@@ -114,36 +114,93 @@ dp = Dispatcher(bot)
 user_state = {}
 pending_expense = {}
 
-conn = psycopg2.connect(DATABASE_URL)
-conn.autocommit = True
-cursor = conn.cursor()
+# ВАЖНО ДЛЯ NEON:
+# Раньше Finance Bot открывал соединение с PostgreSQL при старте и держал его постоянно.
+# Из-за этого Neon мог расходовать compute time даже когда бот ничего не делает.
+# Теперь соединение открывается только на время конкретного SQL-запроса и сразу закрывается
+# после fetchone/fetchall или сразу после команд без результата.
+_db_proxy_last_conn = None
+_db_proxy_last_cursor = None
+
+
+class ShortLivedCursorProxy:
+    def __init__(self):
+        self._conn = None
+        self._cur = None
+        self._has_result = False
+
+    def _close_previous(self):
+        global _db_proxy_last_conn, _db_proxy_last_cursor
+
+        for obj in [self._cur, _db_proxy_last_cursor]:
+            try:
+                if obj and not obj.closed:
+                    obj.close()
+            except Exception:
+                pass
+
+        for obj in [self._conn, _db_proxy_last_conn]:
+            try:
+                if obj and not obj.closed:
+                    obj.close()
+            except Exception:
+                pass
+
+        self._cur = None
+        self._conn = None
+        _db_proxy_last_cursor = None
+        _db_proxy_last_conn = None
+
+    def execute(self, query, params=None):
+        global _db_proxy_last_conn, _db_proxy_last_cursor
+
+        self._close_previous()
+
+        self._conn = psycopg2.connect(DATABASE_URL)
+        self._conn.autocommit = True
+        self._cur = self._conn.cursor()
+
+        if params is None:
+            self._cur.execute(query)
+        else:
+            self._cur.execute(query, params)
+
+        query_text = str(query or "").strip().lower()
+        self._has_result = query_text.startswith("select") or " returning " in f" {query_text} "
+
+        if self._has_result:
+            _db_proxy_last_conn = self._conn
+            _db_proxy_last_cursor = self._cur
+        else:
+            self._close_previous()
+
+        return self
+
+    def fetchone(self):
+        try:
+            if self._cur:
+                return self._cur.fetchone()
+            return None
+        finally:
+            self._close_previous()
+
+    def fetchall(self):
+        try:
+            if self._cur:
+                return self._cur.fetchall()
+            return []
+        finally:
+            self._close_previous()
+
+
+_db_proxy = ShortLivedCursorProxy()
 
 
 def get_cursor():
-    """Возвращает рабочий cursor PostgreSQL.
-    Если Railway/PostgreSQL закрыл старый cursor или соединение, создаем новый.
+    """Возвращает proxy-cursor.
+    Он открывает соединение с Neon только на время конкретного SQL-запроса.
     """
-    global conn, cursor
-
-    try:
-        if conn.closed:
-            conn = psycopg2.connect(DATABASE_URL)
-            conn.autocommit = True
-            cursor = conn.cursor()
-            return cursor
-    except Exception:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = True
-        cursor = conn.cursor()
-        return cursor
-
-    try:
-        if cursor.closed:
-            cursor = conn.cursor()
-    except Exception:
-        cursor = conn.cursor()
-
-    return cursor
+    return _db_proxy
 
 
 # ================== БАЗА ==================
